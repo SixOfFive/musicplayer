@@ -2,14 +2,142 @@
 
 A personal, local-first music player with a Spotify-style interface — Electron + React + TypeScript desktop app for Windows, macOS and Linux (including KDE Plasma).
 
-## Quick start
+## Installing on Windows — step by step
 
-**Windows:** double-click `run.bat` (or run it from a terminal).
-**macOS / Linux:** `./run.sh` from the project root.
+This is a walkthrough for anyone who's never touched Node.js or a terminal before. Follow it top to bottom and you'll have a working install.
 
-Both scripts check for Node (>=18) + npm, install dependencies on first run, rebuild native modules against Electron's ABI, verify the bundled `ffmpeg` binary is present, then launch the dev environment.
+### What you need before you start
 
-Manual:
+- **Windows 10** (21H2+) or **Windows 11**. 64-bit only.
+- An internet connection (for downloading Node.js and the app's dependencies).
+- About **2 GB of free disk space** after dependencies are installed.
+- A folder somewhere on your drive(s) that actually contains music files (`.mp3`, `.flac`, `.wav`, `.m4a`, etc.). Can be a network share / mapped drive — the app handles both.
+
+### Step 1 — Install Node.js (LTS)
+
+Node.js is the JavaScript runtime the app is built on. Electron itself is bundled inside the project's dependencies, but **Node.js needs to be installed system-wide** before you can install those dependencies.
+
+1. Go to **https://nodejs.org**
+2. On the home page you'll see two big green buttons. Click the one labeled **"LTS"** (Long-Term Support). It'll say something like *"Recommended For Most Users"*. As of writing, the LTS version is 22.x; anything **≥ 18** works.
+3. Download the **Windows Installer (.msi)** — `node-vXX.XX.X-x64.msi` (the 64-bit version).
+4. Double-click the downloaded installer.
+5. Click **Next** through the wizard. You can keep every default — do NOT uncheck anything. In particular, leave these checked:
+   - **Add to PATH**  *(critical — this lets our `run.bat` find `node` and `npm`)*
+   - **Automatically install the necessary tools** *(optional — skip if you want; we don't need native compilers)*
+6. Click **Install**. It takes a minute.
+7. Click **Finish** when done.
+
+**Verify Node is installed.** Press `Win+R`, type `cmd`, press Enter. In the black window that opens, type:
+
+```
+node -v
+npm -v
+```
+
+Each should print a version number (e.g. `v22.11.0` and `10.9.0`). If you get *"'node' is not recognized…"*, close the cmd window, open a new one (the PATH change doesn't apply to already-open terminals), and try again. If it still fails, reboot and try once more.
+
+### Step 2 — Install Git (recommended)
+
+Git lets you clone the repository AND lets the app's built-in updater fetch new versions. **Strongly recommended** — without Git the updater can still check for updates but can't apply them automatically.
+
+1. Go to **https://git-scm.com/download/win** — the 64-bit standalone installer downloads automatically.
+2. Double-click the installer.
+3. Accept defaults through every screen (there are many — just hit **Next** repeatedly). The important defaults are:
+   - *"Git from the command line and also from 3rd-party software"* — yes.
+   - *"Use bundled OpenSSH"* — yes.
+   - *"Checkout as-is, commit Unix-style line endings"* — fine.
+4. Click **Install** and wait.
+
+Verify: new `cmd` window → `git --version` → should print a version.
+
+### Step 3 — Get the code
+
+You have two options:
+
+**Option A — Clone with Git (recommended, lets the app self-update).** In a `cmd` window:
+
+```
+cd %USERPROFILE%\Documents
+git clone https://github.com/SixOfFive/musicplayer.git
+cd musicplayer
+```
+
+This puts the code in `Documents\musicplayer`.
+
+**Option B — Download a zip (simpler, but no in-app updates).**
+
+1. Open https://github.com/SixOfFive/musicplayer in a browser.
+2. Click the green **Code** button → **Download ZIP**.
+3. Move the downloaded zip somewhere permanent (e.g. `Documents\`).
+4. Right-click the zip → **Extract All…** → pick a destination (e.g. `Documents\musicplayer`).
+
+### Step 4 — Launch the app
+
+Open the `musicplayer` folder in File Explorer. Find **`run.bat`** (it has a little gear icon).
+
+**Double-click `run.bat`.**
+
+What happens the first time:
+
+1. A black terminal window appears.
+2. It detects Node.js on your PATH. If not found, it tells you clearly and exits — go back to Step 1.
+3. It runs `npm install`, which downloads ~500 MB of dependencies (Electron, React, butterchurn, ffmpeg-static, etc.). This takes **5–10 minutes** on a decent connection and is only this slow the *first* time. You'll see a lot of progress spinners and warnings — warnings are normal and harmless.
+4. It re-links native modules (better-sqlite3) against Electron's Node ABI — another 30 seconds.
+5. Verifies the bundled `ffmpeg.exe` is present (used for the "shrink album" FLAC→MP3 feature). If it got truncated during download, the script auto-runs `npm rebuild ffmpeg-static` to re-fetch it.
+6. Finally, it launches both **Vite** (the dev server) and **Electron** (the actual window). The MusicPlayer window opens.
+
+On subsequent launches, steps 3–5 are skipped unless something changed (the script compares `package.json` mtime against the last-install marker). Startup drops to ~10 seconds.
+
+**If Windows SmartScreen warns you** about `run.bat` or `npm`, click **More info** → **Run anyway**. (The scripts are plain text; you can read them in Notepad before running.)
+
+**If your antivirus quarantines `node_modules\ffmpeg-static\ffmpeg.exe`**, whitelist that path. It's the bundled FFmpeg binary from the official `ffmpeg-static` npm package — benign but some AV engines flag any unsigned ffmpeg build.
+
+### Step 5 — First-run setup inside the app
+
+When the MusicPlayer window first opens you'll see a welcome dialog asking for your music folder:
+
+1. The path shown is the default picked by Windows (`C:\Users\<you>\Music`). If that's where your music lives, just click **Start scanning**.
+2. Otherwise click **Choose folder…** and browse to where it actually is (a drive letter like `M:\` or a full path to a shared folder works fine).
+3. Click **Start scanning**. The scan panel takes over the Home view showing progress. Small libraries (<1000 files) finish in seconds; large libraries (tens of thousands of FLACs) can take 5–15 minutes.
+4. While the tag scan runs, a **background cover-art fetch** also runs in parallel. A purple strip at the bottom of the window shows its progress. Online art comes from MusicBrainz + Cover Art Archive + Deezer (no keys needed).
+5. As albums fill in with covers, the Home, Albums, and Artists views update live — you don't need to reload.
+
+### Step 6 — Day-to-day use
+
+- To **launch** after the first install: just double-click `run.bat` again.
+- To **update** the app: the yellow banner at the top announces new commits. Click **Update now** → it runs `git pull --ff-only` → click **Reload now**. If `package.json` changed, the next full `run.bat` restart auto-reinstalls dependencies.
+- To **close**: close the window or press `Ctrl+C` in the terminal.
+
+### Troubleshooting Windows
+
+- **"node is not recognized"** → Node.js wasn't installed or PATH didn't update. Reinstall with *"Add to PATH"* checked, reboot.
+- **run.bat closes instantly** → Open `cmd`, `cd` to the project folder, run `run.bat` from there so you can read any error.
+- **"repository not found" during update** → you downloaded the zip instead of cloning. Reinstall via Option A above.
+- **Blank window after launch** → open DevTools (**F12**) and check the console. Report the first red line.
+- **ffmpeg missing after install** → `npm rebuild ffmpeg-static` in the project folder, or just re-run `run.bat`.
+
+---
+
+## Other platforms (brief)
+
+**macOS / Linux:**
+
+```bash
+# one-time: install Node.js LTS via your preferred method
+#   macOS:   brew install node
+#   Debian:  sudo apt install nodejs npm
+#   Fedora:  sudo dnf install nodejs npm
+#   Arch:    sudo pacman -S nodejs npm
+
+# then:
+git clone https://github.com/SixOfFive/musicplayer.git
+cd musicplayer
+./run.sh
+```
+
+`run.sh` mirrors `run.bat` — checks Node + npm, warns about missing GTK/alsa/nss libs on Linux, installs deps, verifies the bundled ffmpeg, launches.
+
+**Manual commands** (any platform):
 
 ```bash
 npm install                 # installs deps + rebuilds better-sqlite3 for Electron ABI
