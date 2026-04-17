@@ -11,14 +11,25 @@ interface QueueItem {
   coverArtPath: string | null;
 }
 
+export type RepeatMode = 'off' | 'all' | 'one';
+
 interface PlayerState {
+  // The "play order" — this is what next/prev walk. When shuffle is on,
+  // this is a shuffled permutation of `originalQueue`.
   queue: QueueItem[];
+  // Canonical list order from the view that invoked play(). Used to restore
+  // the non-shuffled order when shuffle turns off. The displayed list never
+  // changes based on shuffle — it's the play order that does.
+  originalQueue: QueueItem[];
   index: number;
   isPlaying: boolean;
   volume: number;
   position: number;
   duration: number;
   likedIds: Set<number>;
+
+  repeatMode: RepeatMode;
+  shuffle: boolean;
 
   play(items: QueueItem[], startIndex?: number): Promise<void>;
   toggle(): void;
@@ -28,25 +39,45 @@ interface PlayerState {
   setVolume(v: number): void;
   setLikedIds(ids: number[]): void;
   toggleLike(trackId: number): Promise<void>;
+
+  setRepeatMode(m: RepeatMode): void;
+  cycleRepeat(): void;
+  setShuffle(on: boolean): void;
+  toggleShuffle(): void;
 }
 
 async function makeUrl(p: string) {
   return window.mp.library.fileUrl(p);
 }
 
+/**
+ * Fisher–Yates shuffle of every item AFTER the pinned index. The currently-
+ * playing track stays at position 0 of the result so the song you're hearing
+ * doesn't jump mid-track when you flip shuffle on.
+ */
+function shuffleKeepingHead<T>(items: T[], pinIndex: number): T[] {
+  if (items.length <= 1) return [...items];
+  const out = [...items];
+  // Move the pinned item to the front.
+  if (pinIndex > 0 && pinIndex < out.length) {
+    const [pinned] = out.splice(pinIndex, 1);
+    out.unshift(pinned);
+  }
+  // Shuffle the tail.
+  for (let i = out.length - 1; i > 1; i--) {
+    const j = 1 + Math.floor(Math.random() * i);
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+
 export const usePlayer = create<PlayerState>((set, get) => {
   const engine = getAudioEngine();
 
   // --- Listening-time accounting ---------------------------------------------
-  // We accumulate audible seconds for the currently-loaded track and flush to
-  // the stats IPC whenever:
-  //   - the track changes (user skip, next, prev, new play() call)
-  //   - the app window unloads (beforeunload)
-  //   - the track ends (counts as completed)
-  // Anything under 5 seconds is discarded — too noisy (misclicks, scrubbing).
   let accountingTrackId: number | null = null;
   let accountingDurationSec: number | null = null;
-  let accountedSec = 0;           // sum of heard time on the current track
+  let accountedSec = 0;
   let lastTickAt: number | null = null;
   const MIN_RECORD_SEC = 5;
 
@@ -59,7 +90,6 @@ export const usePlayer = create<PlayerState>((set, get) => {
 
   function flushAccounting(completed: boolean) {
     if (accountingTrackId != null && accountedSec >= MIN_RECORD_SEC) {
-      // Fire-and-forget; main handles errors.
       void window.mp.stats.recordPlay(accountingTrackId, accountedSec, completed);
     }
     accountingTrackId = null;
@@ -68,15 +98,21 @@ export const usePlayer = create<PlayerState>((set, get) => {
     lastTickAt = null;
   }
 
-  // Tick while playing. Uses wall-clock deltas instead of audio currentTime so
-  // we don't count scrubs/seeks as extra listening.
+  async function loadAndPlay(cur: QueueItem) {
+    const url = await makeUrl(cur.path);
+    engine.setSrc(url);
+    startAccounting(cur.id, cur.durationSec);
+    try { await engine.play(); }
+    catch (err) { console.error('[player] engine.play failed', err); }
+  }
+
+  // tick
   engine.element.addEventListener('timeupdate', () => {
     set({ position: engine.element.currentTime });
     if (!engine.element.paused && accountingTrackId != null) {
       const now = performance.now();
       if (lastTickAt != null) {
         const dt = (now - lastTickAt) / 1000;
-        // Clamp per-tick delta so a long tab-suspend or big seek doesn't inflate.
         if (dt > 0 && dt < 2.0) accountedSec += dt;
       }
       lastTickAt = now;
@@ -85,16 +121,40 @@ export const usePlayer = create<PlayerState>((set, get) => {
   engine.element.addEventListener('loadedmetadata', () => {
     set({ duration: engine.element.duration || 0 });
   });
-  engine.element.addEventListener('ended', () => {
-    // Ensure we count the final sliver before flushing.
+  engine.element.addEventListener('ended', async () => {
+    const s = get();
+    // Final accounting for the just-completed track.
     if (accountingDurationSec) accountedSec = Math.max(accountedSec, accountingDurationSec);
     flushAccounting(true);
-    get().next();
+
+    // Repeat-one: restart the same track.
+    if (s.repeatMode === 'one') {
+      const cur = s.queue[s.index];
+      if (cur) {
+        engine.seek(0);
+        startAccounting(cur.id, cur.durationSec);
+        try { await engine.play(); } catch { /* ignore */ }
+      }
+      return;
+    }
+
+    const ni = s.index + 1;
+    if (ni >= s.queue.length) {
+      // End of queue.
+      if (s.repeatMode === 'all' && s.queue.length > 0) {
+        set({ index: 0 });
+        await loadAndPlay(s.queue[0]);
+      } else {
+        engine.stop();
+      }
+      return;
+    }
+    set({ index: ni });
+    await loadAndPlay(s.queue[ni]);
   });
   engine.element.addEventListener('play', () => { set({ isPlaying: true }); lastTickAt = performance.now(); });
   engine.element.addEventListener('pause', () => { set({ isPlaying: false }); lastTickAt = null; });
 
-  // Flush on window close so partial listens aren't lost.
   window.addEventListener('beforeunload', () => {
     const completed = accountingDurationSec ? accountedSec / accountingDurationSec > 0.5 : false;
     flushAccounting(completed);
@@ -102,55 +162,68 @@ export const usePlayer = create<PlayerState>((set, get) => {
 
   return {
     queue: [],
+    originalQueue: [],
     index: -1,
     isPlaying: false,
     volume: 0.8,
     position: 0,
     duration: 0,
     likedIds: new Set<number>(),
+    repeatMode: 'off',
+    shuffle: false,
 
     async play(items, startIndex = 0) {
-      // Flush any in-flight listen on the previous track (user skipped to a new queue).
       flushAccounting(accountingDurationSec ? accountedSec / accountingDurationSec > 0.5 : false);
-      set({ queue: items, index: startIndex });
-      const cur = items[startIndex];
-      if (!cur) return;
-      const url = await makeUrl(cur.path);
-      console.log(`[player] play | title="${cur.title}" | path=${cur.path} | url=${url}`);
-      engine.setSrc(url);
-      startAccounting(cur.id, cur.durationSec);
-      try {
-        await engine.play();
-      } catch (err) {
-        console.error('[player] engine.play failed', err);
+
+      // Honour the current shuffle toggle: if on, reshuffle the new queue.
+      const { shuffle } = get();
+      const original = [...items];
+      let playQueue = original;
+      let startIdx = startIndex;
+      if (shuffle) {
+        playQueue = shuffleKeepingHead(original, startIndex);
+        startIdx = 0;
       }
+
+      set({ originalQueue: original, queue: playQueue, index: startIdx });
+      const cur = playQueue[startIdx];
+      if (!cur) return;
+      console.log(`[player] play | title="${cur.title}" | shuffle=${shuffle} | queueLen=${playQueue.length}`);
+      await loadAndPlay(cur);
     },
+
     toggle() {
       if (engine.element.paused) engine.play();
       else engine.pause();
     },
+
     async next() {
-      const { queue, index } = get();
+      const s = get();
       flushAccounting(accountingDurationSec ? accountedSec / accountingDurationSec > 0.5 : false);
-      const ni = index + 1;
-      if (ni >= queue.length) { engine.stop(); return; }
-      const cur = queue[ni];
+      if (s.queue.length === 0) return;
+      let ni = s.index + 1;
+      if (ni >= s.queue.length) {
+        if (s.repeatMode === 'all') ni = 0;
+        else { engine.stop(); return; }
+      }
       set({ index: ni });
-      engine.setSrc(await makeUrl(cur.path));
-      startAccounting(cur.id, cur.durationSec);
-      await engine.play();
+      await loadAndPlay(s.queue[ni]);
     },
+
     async prev() {
-      const { queue, index } = get();
+      const s = get();
       if (engine.element.currentTime > 3) { engine.seek(0); return; }
       flushAccounting(accountingDurationSec ? accountedSec / accountingDurationSec > 0.5 : false);
-      const ni = Math.max(0, index - 1);
-      const cur = queue[ni];
+      if (s.queue.length === 0) return;
+      let ni = s.index - 1;
+      if (ni < 0) {
+        if (s.repeatMode === 'all') ni = s.queue.length - 1;
+        else ni = 0;
+      }
       set({ index: ni });
-      engine.setSrc(await makeUrl(cur.path));
-      startAccounting(cur.id, cur.durationSec);
-      await engine.play();
+      await loadAndPlay(s.queue[ni]);
     },
+
     seek(sec) { engine.seek(sec); },
     setVolume(v) { engine.setVolume(v); set({ volume: v }); },
     setLikedIds(ids) { set({ likedIds: new Set(ids) }); },
@@ -161,6 +234,47 @@ export const usePlayer = create<PlayerState>((set, get) => {
         if (liked) next.add(trackId); else next.delete(trackId);
         return { likedIds: next };
       });
+    },
+
+    setRepeatMode(m) { set({ repeatMode: m }); },
+    cycleRepeat() {
+      const order: RepeatMode[] = ['off', 'all', 'one'];
+      const s = get();
+      const next = order[(order.indexOf(s.repeatMode) + 1) % order.length];
+      set({ repeatMode: next });
+    },
+
+    setShuffle(on) {
+      const s = get();
+      if (on === s.shuffle && on === true) {
+        // Clicking shuffle while already on re-shuffles (with the current track pinned).
+        const curId = s.queue[s.index]?.id;
+        const origIdx = s.originalQueue.findIndex((t) => t.id === curId);
+        const shuffled = shuffleKeepingHead(s.originalQueue, Math.max(0, origIdx));
+        set({ queue: shuffled, index: 0 });
+        return;
+      }
+      if (on) {
+        if (s.queue.length === 0) { set({ shuffle: true }); return; }
+        const curId = s.queue[s.index]?.id;
+        const origIdx = s.originalQueue.findIndex((t) => t.id === curId);
+        const shuffled = shuffleKeepingHead(s.originalQueue, Math.max(0, origIdx));
+        set({ shuffle: true, queue: shuffled, index: 0 });
+      } else {
+        // Restore original order — point `index` at whatever track was current.
+        const curId = s.queue[s.index]?.id;
+        const origIdx = s.originalQueue.findIndex((t) => t.id === curId);
+        set({
+          shuffle: false,
+          queue: [...s.originalQueue],
+          index: Math.max(0, origIdx),
+        });
+      }
+    },
+    toggleShuffle() {
+      const s = get();
+      // If shuffle is on, clicking turns it OFF. If off, turn on (and shuffle once).
+      get().setShuffle(!s.shuffle);
     },
   };
 });

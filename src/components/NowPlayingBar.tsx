@@ -8,9 +8,18 @@ function fmt(sec: number) {
 }
 
 export default function NowPlayingBar() {
-  const { queue, index, isPlaying, toggle, next, prev, position, duration, volume, setVolume, seek, likedIds, toggleLike } = usePlayer();
+  const {
+    queue, index, isPlaying, toggle, next, prev, position, duration,
+    volume, setVolume, seek, likedIds, toggleLike,
+    shuffle, toggleShuffle, repeatMode, cycleRepeat,
+  } = usePlayer();
   const cur = queue[index];
   const liked = cur ? likedIds.has(cur.id) : false;
+
+  const repeatTitle =
+    repeatMode === 'off' ? 'Repeat: off'
+    : repeatMode === 'all' ? 'Repeat all'
+    : 'Repeat one (current song loops)';
 
   return (
     <footer className="h-20 bg-bg-elev-1 border-t border-white/5 grid grid-cols-3 items-center px-4">
@@ -37,14 +46,32 @@ export default function NowPlayingBar() {
 
       <div className="flex flex-col items-center gap-1">
         <div className="flex items-center gap-4">
-          <button onClick={prev} className="text-text-secondary hover:text-white">«</button>
+          <button
+            onClick={toggleShuffle}
+            className={`text-lg transition ${shuffle ? 'text-accent' : 'text-text-secondary hover:text-white'}`}
+            title={shuffle ? 'Shuffle on — click to turn off' : 'Shuffle (one-time randomization, keeps current track playing)'}
+            aria-label="Shuffle"
+          >
+            ⇄
+            {shuffle && <span className="block w-1 h-1 rounded-full bg-accent mx-auto -mt-1" />}
+          </button>
+          <button onClick={prev} className="text-text-secondary hover:text-white text-xl" title="Previous">⏮</button>
           <button
             onClick={toggle}
             className="w-9 h-9 rounded-full bg-white text-black flex items-center justify-center hover:scale-105 transition"
           >
             {isPlaying ? '❚❚' : '▶'}
           </button>
-          <button onClick={next} className="text-text-secondary hover:text-white">»</button>
+          <button onClick={next} className="text-text-secondary hover:text-white text-xl" title="Next">⏭</button>
+          <button
+            onClick={cycleRepeat}
+            className={`text-lg transition ${repeatMode !== 'off' ? 'text-accent' : 'text-text-secondary hover:text-white'}`}
+            title={repeatTitle}
+            aria-label="Repeat"
+          >
+            {repeatMode === 'one' ? '🔂' : '🔁'}
+            {repeatMode !== 'off' && <span className="block w-1 h-1 rounded-full bg-accent mx-auto -mt-1" />}
+          </button>
         </div>
         <div className="flex items-center gap-2 w-full max-w-lg text-[11px] text-text-muted">
           <span className="w-10 text-right">{fmt(position)}</span>
