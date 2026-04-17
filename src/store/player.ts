@@ -84,15 +84,24 @@ export const usePlayer = create<PlayerState>((set, get) => {
       void window.mp.settings.set({ playback: { volume: v } } as any);
     }, 300);
   }
-  // Load stored volume at init. Until then the default (0.8) is in effect;
-  // once loaded, both state and the engine's GainNode are updated.
+  // Apply persisted audio settings at startup — volume and the equalizer
+  // curve. The EqualizerPanel also does this when it mounts, but that only
+  // fires if the user opens the collapsible EQ section. Doing it here means
+  // a saved EQ preset is in effect from the first sample of audio.
   window.mp.settings.get().then((s: any) => {
     const v = s?.playback?.volume;
     if (typeof v === 'number' && v >= 0 && v <= 1) {
       engine.setVolume(v);
       set({ volume: v });
     }
-  }).catch(() => { /* fall back to default */ });
+    const p = s?.playback ?? {};
+    const enabled = !!p.eqEnabled;
+    const gains = Array.isArray(p.eqGainsDb) && p.eqGainsDb.length === 10
+      ? p.eqGainsDb
+      : [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    const preamp = typeof p.eqPreamp === 'number' ? p.eqPreamp : 0;
+    engine.setEq(enabled, gains, preamp);
+  }).catch(() => { /* fall back to defaults */ });
 
   // --- Listening-time accounting ---------------------------------------------
   let accountingTrackId: number | null = null;
