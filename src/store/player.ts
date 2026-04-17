@@ -130,6 +130,17 @@ export const usePlayer = create<PlayerState>((set, get) => {
   async function loadAndPlay(cur: QueueItem) {
     const url = await makeUrl(cur.path);
     engine.setSrc(url);
+    // Prime the displayed duration from the DB-parsed tag value so the right-
+    // hand time readout shows something immediately. The HTMLAudioElement's
+    // own duration field is usually NaN or 0 for the first few frames —
+    // especially for formats without a header-declared length (MP3 CBR
+    // without Xing header, some FLACs). `loadedmetadata` / `durationchange`
+    // below will upgrade to the element's exact value once it's known.
+    if (typeof cur.durationSec === 'number' && cur.durationSec > 0) {
+      set({ duration: cur.durationSec });
+    } else {
+      set({ duration: 0 });
+    }
     startAccounting(cur.id, cur.durationSec);
     try { await engine.play(); }
     catch (err) { console.error('[player] engine.play failed', err); }
@@ -147,9 +158,20 @@ export const usePlayer = create<PlayerState>((set, get) => {
       lastTickAt = now;
     }
   });
-  engine.element.addEventListener('loadedmetadata', () => {
-    set({ duration: engine.element.duration || 0 });
-  });
+  // Only upgrade our displayed duration if the element produces a FINITE
+  // positive number. For MP3s without a Xing/VBR header the browser reports
+  // `Infinity` or `NaN` until it's scanned enough of the file — during that
+  // window we want to keep the tag-derived value from loadAndPlay, not
+  // clobber it with 0. `durationchange` fires whenever the element updates
+  // its internal duration; hook it alongside `loadedmetadata`.
+  const applyElementDuration = () => {
+    const d = engine.element.duration;
+    if (Number.isFinite(d) && d > 0) {
+      set({ duration: d });
+    }
+  };
+  engine.element.addEventListener('loadedmetadata', applyElementDuration);
+  engine.element.addEventListener('durationchange', applyElementDuration);
   engine.element.addEventListener('ended', async () => {
     const s = get();
     // Final accounting for the just-completed track.
