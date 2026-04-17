@@ -5,6 +5,7 @@ import { usePlayer } from '../store/player';
 import { useLibraryRefresh } from '../hooks/useLibraryRefresh';
 import { mediaUrl } from '../lib/mediaUrl';
 import ShrinkAlbumButton from '../components/ShrinkAlbumButton';
+import MiniVisualizer from '../components/MiniVisualizer';
 import type { LibraryStats } from '../../shared/types';
 
 interface AlbumMeta {
@@ -62,7 +63,7 @@ export default function AlbumView() {
         ) : (
           <div className="w-56 h-56 rounded bg-bg-highlight flex-shrink-0" />
         )}
-        <div className="flex flex-col justify-end min-w-0">
+        <div className="flex flex-col justify-end min-w-0 flex-1">
           <div className="text-xs uppercase tracking-wide text-text-muted">Album</div>
           <h1 className="text-6xl font-extrabold my-2 truncate">{album.title}</h1>
           <div className="text-sm text-text-secondary">
@@ -72,6 +73,7 @@ export default function AlbumView() {
             {' · '}{tracks.length} tracks · {Math.floor(totalSec / 60)} min
           </div>
         </div>
+        <MiniVisualizer className="hidden md:block w-64 h-36 flex-shrink-0 self-end" />
       </header>
 
       <div className="px-8 pb-4 flex items-start gap-4 flex-wrap">
