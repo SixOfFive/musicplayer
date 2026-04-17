@@ -1,9 +1,14 @@
 @echo off
-setlocal
+setlocal enabledelayedexpansion
 
 REM MusicPlayer - Windows launcher
-REM First run: installs dependencies and rebuilds native modules for Electron.
-REM Subsequent runs: just starts the dev environment (Vite + Electron).
+REM Self-heals dependencies at every run:
+REM   - npm install if node_modules is missing
+REM   - npm install if package.json is newer than node_modules/.package-lock.json
+REM     (catches newly-added deps since the last install)
+REM   - npm rebuild ffmpeg-static if its binary is missing
+REM     (catches interrupted binary downloads)
+REM Then launches the dev environment.
 
 cd /d "%~dp0"
 
@@ -14,9 +19,36 @@ if errorlevel 1 (
     exit /b 1
 )
 
+set "NEEDS_INSTALL=0"
+
+REM 1) Missing node_modules entirely — first run or freshly cleaned.
 if not exist "node_modules" (
+    set "NEEDS_INSTALL=1"
+    echo [deps] node_modules not found.
+)
+
+REM 2) package.json was modified after the last install.
+REM    We compare mtimes via `forfiles /d` + a timestamp written after install.
+if "!NEEDS_INSTALL!"=="0" (
+    if exist "node_modules\.package-lock.json" (
+        for %%A in ("package.json") do set "PKG_MTIME=%%~tA"
+        for %%A in ("node_modules\.package-lock.json") do set "LOCK_MTIME=%%~tA"
+        REM Lex-sort trick: Windows %~t output is `MM/DD/YYYY HH:MM AM` which doesn't
+        REM sort reliably. Use PowerShell for a proper comparison.
+        for /f "delims=" %%R in ('powershell -NoProfile -Command "if ((Get-Item package.json).LastWriteTime -gt (Get-Item node_modules\.package-lock.json).LastWriteTime) { 'newer' } else { 'same' }"') do set "PKG_CMP=%%R"
+        if "!PKG_CMP!"=="newer" (
+            set "NEEDS_INSTALL=1"
+            echo [deps] package.json is newer than last install — re-syncing.
+        )
+    ) else (
+        set "NEEDS_INSTALL=1"
+        echo [deps] No lock marker found — re-installing.
+    )
+)
+
+if "!NEEDS_INSTALL!"=="1" (
     echo ======================================================================
-    echo  First run detected - installing dependencies. This can take a while.
+    echo  Installing / updating dependencies...
     echo ======================================================================
     call npm install
     if errorlevel 1 (
@@ -24,25 +56,23 @@ if not exist "node_modules" (
         pause
         exit /b 1
     )
-
-    echo ======================================================================
-    echo  Rebuilding native modules against Electron's Node ABI...
-    echo ======================================================================
-    call npm run rebuild
-    if errorlevel 1 (
-        echo [WARN] electron-rebuild failed. If the app errors out loading better-sqlite3,
-        echo        run "npm run rebuild" manually.
-    )
 )
 
-REM Sanity-check that the ffmpeg binary (used for FLAC->MP3 conversion) is present.
-REM ffmpeg-static bundles a platform-specific binary; if it's missing the
-REM "Shrink album" feature will silently fail — warn here.
-if exist "node_modules\ffmpeg-static\ffmpeg.exe" (
-    echo [ok] Bundled ffmpeg present.
+REM 3) ffmpeg binary probe. ffmpeg-static downloads the binary during its
+REM    postinstall script. If the download was interrupted (network blip,
+REM    antivirus quarantine, proxy), the package is "installed" but the
+REM    binary is missing. `npm rebuild` re-runs the postinstall hook.
+if not exist "node_modules\ffmpeg-static\ffmpeg.exe" (
+    echo [deps] ffmpeg binary missing. Rebuilding ffmpeg-static...
+    call npm rebuild ffmpeg-static
+    if not exist "node_modules\ffmpeg-static\ffmpeg.exe" (
+        echo [WARN] Still no ffmpeg binary after rebuild. FLAC-to-MP3 conversion will be disabled.
+        echo        Try: npm install ffmpeg-static --force
+    ) else (
+        echo [ok] ffmpeg-static ready.
+    )
 ) else (
-    echo [WARN] ffmpeg-static binary not found. FLAC-to-MP3 conversion will be disabled.
-    echo        Run: npm install ffmpeg-static
+    echo [ok] Bundled ffmpeg present.
 )
 
 echo ======================================================================
