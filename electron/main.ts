@@ -9,6 +9,7 @@ import { registerMetadataIpc } from './ipc/metadata';
 import { registerPlaylistsIpc } from './ipc/playlists';
 import { registerStatsIpc } from './ipc/stats';
 import { registerConvertIpc } from './ipc/convert';
+import { registerUpdateIpc } from './ipc/update';
 import { importPlaylistsFromFolder } from './services/playlist-export';
 import { initDatabase } from './services/db';
 import { initSettings } from './services/settings-store';
@@ -83,11 +84,14 @@ function registerMediaProtocol() {
   protocol.handle('mp-media', async (req) => {
     try {
       const url = new URL(req.url);
-      // Pathname is like `/M:/music/Artist/Album/Track.mp3` — leading slash stripped
-      // gives us the native Windows path. URL parser already decoded %-escapes per
-      // segment, so a single decodeURIComponent pass would double-decode any real
-      // `%` characters in filenames; decode per segment instead.
-      const segments = url.pathname.replace(/^\/+/, '').split('/').map(decodeURIComponent);
+      // URL format differs per OS:
+      //   Windows path `M:\music\foo` → encoded as `mp-media://local/M:/music/foo`
+      //     → pathname `/M:/music/foo` → strip ONE leading `/` → `M:/music/foo`
+      //   Unix path   `/home/foo`      → encoded as `mp-media://local//home/foo`
+      //     → pathname `//home/foo` → strip ONE leading `/` → `/home/foo`
+      // A greedy `replace(/^\/+/, '')` would eat the Unix root slash.
+      // Decode per-segment so `%` literals in filenames aren't double-decoded.
+      const segments = url.pathname.replace(/^\//, '').split('/').map(decodeURIComponent);
       const filePath = segments.join(path.sep);
       const fileUrl = pathToFileURL(filePath).toString();
       process.stdout.write(`[mp-media] req=${req.url}\n            file=${filePath}\n            range=${req.headers.get('range') ?? 'none'}\n`);
@@ -116,6 +120,7 @@ app.whenReady().then(async () => {
   registerPlaylistsIpc(ipcMain);
   registerStatsIpc(ipcMain);
   registerConvertIpc(ipcMain, () => mainWindow);
+  registerUpdateIpc(ipcMain);
 
   // Simple directory picker wired directly here so the renderer doesn't need dialog access.
   ipcMain.handle('library:pick-dir', async () => {

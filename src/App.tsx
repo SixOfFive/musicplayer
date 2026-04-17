@@ -5,6 +5,7 @@ import TopBar from './components/TopBar';
 import NowPlayingBar from './components/NowPlayingBar';
 import FirstRun from './components/FirstRun';
 import ArtStatusStrip from './components/ArtStatusStrip';
+import UpdateBanner from './components/UpdateBanner';
 import Home from './views/Home';
 import LibraryView from './views/LibraryView';
 import AlbumsView from './views/AlbumsView';
@@ -33,6 +34,7 @@ export default function App() {
 
   return (
     <div className="h-screen w-screen flex flex-col bg-black">
+      <UpdateBanner />
       <div className="flex-1 min-h-0 grid grid-cols-[260px_1fr]">
         <Sidebar />
         <div className="flex flex-col min-h-0 bg-bg-base rounded-tl-lg">

@@ -22,6 +22,12 @@ function defaults(): AppSettings {
       pathStyle: 'absolute',
       exportLiked: true,
     },
+    update: {
+      enabled: true,
+      checkOnStartup: true,
+      repoSlug: 'SixOfFive/musicplayer',
+      branch: 'main',
+    },
     library: {
       directories: [],
       databasePath: path.join(userData, 'library.db'),

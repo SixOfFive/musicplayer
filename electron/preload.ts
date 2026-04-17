@@ -65,6 +65,11 @@ const api = {
       ipcRenderer.invoke(IPC.STATS_RECORD_PLAY, trackId, listenedSec, completed),
     overview: () => ipcRenderer.invoke(IPC.STATS_OVERVIEW),
   },
+  update: {
+    info: () => ipcRenderer.invoke(IPC.UPDATE_INFO),
+    check: () => ipcRenderer.invoke(IPC.UPDATE_CHECK),
+    apply: () => ipcRenderer.invoke(IPC.UPDATE_APPLY),
+  },
   convert: {
     checkAvailable: () => ipcRenderer.invoke(IPC.CONVERT_CHECK_AVAILABLE),
     albumToMp3: (albumId: number) => ipcRenderer.invoke(IPC.CONVERT_ALBUM_TO_MP3, albumId),

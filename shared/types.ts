@@ -164,6 +164,7 @@ export interface AppSettings {
   firstRunComplete: boolean;
   conversion: ConversionSettings;
   playlistExport: PlaylistExportSettings;
+  update: UpdateSettings;
   library: {
     directories: LibraryDirectory[];
     databasePath: string;
@@ -264,7 +265,31 @@ export const IPC = {
   // Playlist export / import (universal M3U8)
   PL_EXPORT_ALL: 'pl:export-all',
   PL_IMPORT_FROM_FOLDER: 'pl:import-from-folder',
+  // Self-update (git-based)
+  UPDATE_INFO: 'update:info',
+  UPDATE_CHECK: 'update:check',
+  UPDATE_APPLY: 'update:apply',
 } as const;
+
+export interface UpdateCheckResult {
+  upToDate: boolean;
+  currentVersion: string;
+  currentSha: string | null;
+  latestSha: string | null;
+  commitsBehind: number | null;
+  latestMessage: string | null;
+  latestDate: string | null;
+  dirtyWorkingTree: boolean;
+  error: string | null;
+  upstreamUrl: string;
+}
+
+export interface UpdateSettings {
+  enabled: boolean;
+  checkOnStartup: boolean;
+  repoSlug: string;         // "SixOfFive/musicplayer"
+  branch: string;           // "main"
+}
 
 export interface LibraryStats {
   trackCount: number;
