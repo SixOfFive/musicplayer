@@ -2,6 +2,7 @@ import { NavLink, useNavigate } from 'react-router-dom';
 import { useLibrary } from '../store/library';
 import { useRef, useState } from 'react';
 import { LIKED_PLAYLIST_ID } from '../../shared/types';
+import EqualizerPanel from './EqualizerPanel';
 
 export default function Sidebar() {
   const playlists = useLibrary((s) => s.playlists);
@@ -9,6 +10,7 @@ export default function Sidebar() {
   const nav = useNavigate();
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
+  const [eqOpen, setEqOpen] = useState(false);
   // Guard against double-create when Enter triggers both keydown AND blur.
   const creatingLock = useRef(false);
 
@@ -96,6 +98,18 @@ export default function Sidebar() {
             </div>
           </NavLink>
         ))}
+      </div>
+
+      <div className="border-t border-white/5">
+        <button
+          onClick={() => setEqOpen((v) => !v)}
+          className="w-full flex items-center justify-between px-3 py-2 text-xs uppercase tracking-wider text-text-muted hover:text-text-primary transition"
+          title={eqOpen ? 'Hide equalizer' : 'Show equalizer'}
+        >
+          <span>Equalizer</span>
+          <span>{eqOpen ? '▾' : '▸'}</span>
+        </button>
+        {eqOpen && <EqualizerPanel />}
       </div>
     </aside>
   );

@@ -31,12 +31,28 @@ export interface AudioFrame {
 
 export type FrameListener = (f: AudioFrame) => void;
 
+/**
+ * 10-band graphic equalizer centers (Hz). ISO third-octave standard spacing
+ * (each step is 2× the previous — the same spacing used by foobar2000,
+ * Winamp, and car stereos). Q ≈ 1.414 gives smooth inter-band overlap.
+ */
+export const EQ_BANDS_HZ = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
+export const EQ_BAND_COUNT = EQ_BANDS_HZ.length;
+const EQ_Q = 1.414;
+const EQ_MIN_DB = -12;
+const EQ_MAX_DB = +12;
+
 export class AudioEngine {
   readonly element: HTMLAudioElement;
   readonly context: AudioContext;
   readonly analyser: AnalyserNode;
   readonly source: MediaElementAudioSourceNode;
   readonly gain: GainNode;
+  // Pre-amp before the EQ chain (lets users pull hot masters down before
+  // boosting bands, to avoid clipping).
+  readonly preamp: GainNode;
+  // Ten BiquadFilterNodes in series (one peaking filter per band).
+  readonly eqBands: BiquadFilterNode[];
 
   private readonly freqBytes: Uint8Array<ArrayBuffer>;
   private readonly waveBytes: Uint8Array<ArrayBuffer>;
@@ -74,10 +90,32 @@ export class AudioEngine {
     this.analyser = this.context.createAnalyser();
     this.analyser.fftSize = fftSize;
     this.analyser.smoothingTimeConstant = this.smoothing;
+    this.preamp = this.context.createGain();
+    this.preamp.gain.value = 1.0;
     this.gain = this.context.createGain();
 
+    // Build the EQ chain: 10 peaking biquads in series. Starts flat (0 dB).
+    this.eqBands = EQ_BANDS_HZ.map((hz) => {
+      const b = this.context.createBiquadFilter();
+      b.type = 'peaking';
+      b.frequency.value = hz;
+      b.Q.value = EQ_Q;
+      b.gain.value = 0;
+      return b;
+    });
+
+    // Signal path:  source → analyser → preamp → eqBand[0..9] → gain → destination
+    // Analyser is upstream of the EQ so visualizers react to the original
+    // audio, not the user's EQ'd version (otherwise pulling treble down
+    // would starve the visualizer's treble bin).
     this.source.connect(this.analyser);
-    this.analyser.connect(this.gain);
+    this.analyser.connect(this.preamp);
+    let node: AudioNode = this.preamp;
+    for (const b of this.eqBands) {
+      node.connect(b);
+      node = b;
+    }
+    node.connect(this.gain);
     this.gain.connect(this.context.destination);
 
     // Back each typed array with an explicit ArrayBuffer so TS 5.7+ infers
@@ -109,6 +147,22 @@ export class AudioEngine {
   stop() { this.element.pause(); this.element.currentTime = 0; }
   seek(t: number) { this.element.currentTime = t; }
   setVolume(v: number) { this.gain.gain.value = Math.max(0, Math.min(1, v)); }
+
+  /**
+   * Set band gains (dB). Pass length-10 array matching EQ_BANDS_HZ. Out-of-range
+   * values are clamped to [-12, +12] dB. When `enabled` is false, all bands
+   * are forced to 0 dB (effectively bypassed) regardless of the gains array.
+   */
+  setEq(enabled: boolean, gainsDb: number[], preampDb: number) {
+    for (let i = 0; i < this.eqBands.length; i++) {
+      const raw = gainsDb[i] ?? 0;
+      const clamped = Math.max(EQ_MIN_DB, Math.min(EQ_MAX_DB, raw));
+      this.eqBands[i].gain.value = enabled ? clamped : 0;
+    }
+    // Preamp expressed in dB, converted to linear gain. Negative = quieter.
+    const preampClamped = Math.max(-12, Math.min(6, preampDb));
+    this.preamp.gain.value = enabled ? Math.pow(10, preampClamped / 20) : 1.0;
+  }
   setSensitivity(v: number) { this.sensitivity = Math.max(0, Math.min(1, v)); }
   setSmoothing(v: number) {
     this.smoothing = Math.max(0, Math.min(1, v));

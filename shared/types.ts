@@ -189,6 +189,13 @@ export interface AppSettings {
     crossfadeMs: number;
     replayGain: 'off' | 'track' | 'album';
     outputDevice: string | null;
+    // Last known volume, 0..1. Restored on startup so users aren't blasted
+    // at 80% when they had it low, or vice versa.
+    volume: number;
+    // 10-band parametric EQ (ISO third-octave centers). Gains in dB, -12..+12.
+    eqEnabled: boolean;
+    eqGainsDb: number[];   // length 10
+    eqPreamp: number;      // dB, -12..+6, applied before bands
   };
 }
 

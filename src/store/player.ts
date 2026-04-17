@@ -74,6 +74,26 @@ function shuffleKeepingHead<T>(items: T[], pinIndex: number): T[] {
 export const usePlayer = create<PlayerState>((set, get) => {
   const engine = getAudioEngine();
 
+  // Volume persistence. Saved to settings.playback.volume with a debounce so
+  // dragging the slider doesn't slam the JSON file every frame.
+  let volumeSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  function scheduleVolumeSave(v: number) {
+    if (volumeSaveTimer) clearTimeout(volumeSaveTimer);
+    volumeSaveTimer = setTimeout(() => {
+      volumeSaveTimer = null;
+      void window.mp.settings.set({ playback: { volume: v } } as any);
+    }, 300);
+  }
+  // Load stored volume at init. Until then the default (0.8) is in effect;
+  // once loaded, both state and the engine's GainNode are updated.
+  window.mp.settings.get().then((s: any) => {
+    const v = s?.playback?.volume;
+    if (typeof v === 'number' && v >= 0 && v <= 1) {
+      engine.setVolume(v);
+      set({ volume: v });
+    }
+  }).catch(() => { /* fall back to default */ });
+
   // --- Listening-time accounting ---------------------------------------------
   let accountingTrackId: number | null = null;
   let accountingDurationSec: number | null = null;
@@ -225,7 +245,7 @@ export const usePlayer = create<PlayerState>((set, get) => {
     },
 
     seek(sec) { engine.seek(sec); },
-    setVolume(v) { engine.setVolume(v); set({ volume: v }); },
+    setVolume(v) { engine.setVolume(v); set({ volume: v }); scheduleVolumeSave(v); },
     setLikedIds(ids) { set({ likedIds: new Set(ids) }); },
     async toggleLike(trackId) {
       const liked = await window.mp.likes.toggle(trackId);

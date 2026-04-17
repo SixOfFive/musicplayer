@@ -60,6 +60,10 @@ function defaults(): AppSettings {
       crossfadeMs: 0,
       replayGain: 'off',
       outputDevice: null,
+      volume: 0.8,
+      eqEnabled: false,
+      eqGainsDb: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      eqPreamp: 0,
     },
   };
 }
