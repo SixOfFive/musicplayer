@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { AppSettings, VisualizerPlugin } from '../../../shared/types';
+import { listBundledMilkdrop } from '../../visualizer/preset-list';
 
 export default function VisualizerSettings() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
@@ -7,7 +8,11 @@ export default function VisualizerSettings() {
 
   async function refresh() {
     setSettings(await window.mp.settings.get());
-    setPlugins(await window.mp.visualizer.list());
+    const [ipc, milk] = await Promise.all([
+      window.mp.visualizer.list(),
+      listBundledMilkdrop(),
+    ]);
+    setPlugins([...(ipc as VisualizerPlugin[]), ...milk]);
   }
   useEffect(() => { refresh(); }, []);
 

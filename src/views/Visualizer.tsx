@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { VisualizerPlugin } from '../../shared/types';
 import { getAudioEngine } from '../audio/AudioEngine';
 import { VisualizerHost } from '../visualizer/host';
+import { listBundledMilkdrop } from '../visualizer/preset-list';
 import { usePlayer } from '../store/player';
 
 export default function Visualizer() {
@@ -13,10 +14,14 @@ export default function Visualizer() {
 
   useEffect(() => {
     (async () => {
-      const list = await window.mp.visualizer.list();
-      setPlugins(list);
+      const [ipcList, milk] = await Promise.all([
+        window.mp.visualizer.list(),
+        listBundledMilkdrop(),
+      ]);
+      const merged = [...(ipcList as VisualizerPlugin[]), ...milk];
+      setPlugins(merged);
       const s = await window.mp.settings.get();
-      setActiveId(s.visualizer.activePluginId ?? list[0]?.id ?? null);
+      setActiveId(s.visualizer.activePluginId ?? merged[0]?.id ?? null);
     })();
   }, []);
 

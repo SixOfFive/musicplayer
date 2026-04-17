@@ -4,8 +4,13 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>MusicPlayer</title>
+    <!-- 'unsafe-eval' in script-src is required by butterchurn (Milkdrop).
+         Milkdrop presets are a DSL that's compiled to JS at runtime via
+         `new Function(...)`. Our renderer only loads local code + local
+         audio files (mp-media:// protocol) — no remote scripts — so the
+         extra attack surface is minimal for this app's threat model. -->
     <meta http-equiv="Content-Security-Policy"
-          content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: file: mp-media:; media-src 'self' file: mp-media: blob:; script-src 'self'; connect-src 'self' https: ws: wss:;" />
+          content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: file: mp-media:; media-src 'self' file: mp-media: blob:; script-src 'self' 'unsafe-eval'; connect-src 'self' https: ws: wss:;" />
   </head>
   <body class="bg-bg-base text-text-primary">
     <div id="root"></div>

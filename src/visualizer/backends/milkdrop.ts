@@ -6,12 +6,15 @@ import type { AudioEngine, AudioFrame } from '../../audio/AudioEngine';
 import type { VisualizerBackend } from '../plugin-api';
 
 export async function makeMilkdrop(pluginId: string, source: string): Promise<VisualizerBackend> {
+  console.log(`[milkdrop] makeMilkdrop pluginId=${pluginId} source="${source}"`);
   const [butterchurnMod, presetsMod]: [any, any] = await Promise.all([
     import('butterchurn' as any),
     import('butterchurn-presets' as any),
   ]);
   const butterchurn = butterchurnMod.default ?? butterchurnMod;
   const presets = presetsMod.default ?? presetsMod;
+  const butterchurnOk = typeof butterchurn?.createVisualizer === 'function';
+  console.log(`[milkdrop] modules loaded | butterchurn.createVisualizer=${butterchurnOk} | presets.getPresets=${typeof presets?.getPresets}`);
 
   let visualizer: any = null;
   let w = 0, h = 0;
@@ -26,8 +29,9 @@ export async function makeMilkdrop(pluginId: string, source: string): Promise<Vi
     }
     // 2) Otherwise assume it's a key into the bundled butterchurn presets map.
     const all = presets.getPresets?.() ?? presets;
-    const key = Object.keys(all).find((k) => k.toLowerCase() === src.toLowerCase())
-             ?? Object.keys(all)[0];
+    const keys = Object.keys(all);
+    const key = keys.find((k) => k.toLowerCase() === src.toLowerCase()) ?? keys[0];
+    console.log(`[milkdrop] resolved preset | requested="${src}" | chosen="${key}" | totalAvailable=${keys.length}`);
     return all[key];
   }
 
@@ -36,17 +40,31 @@ export async function makeMilkdrop(pluginId: string, source: string): Promise<Vi
     name: `Milkdrop: ${source}`,
     async init(canvas: HTMLCanvasElement, engine: AudioEngine) {
       w = canvas.width; h = canvas.height;
-      visualizer = butterchurn.createVisualizer(engine.context, canvas, {
-        width: w, height: h, pixelRatio: window.devicePixelRatio || 1,
-      });
-      visualizer.connectAudio(engine.analyser);
-      const preset = await resolvePreset(source);
-      if (preset) visualizer.loadPreset(preset, 0.0);
+      try {
+        visualizer = butterchurn.createVisualizer(engine.context, canvas, {
+          width: w, height: h, pixelRatio: window.devicePixelRatio || 1,
+        });
+        visualizer.connectAudio(engine.analyser);
+        const preset = await resolvePreset(source);
+        if (preset) {
+          visualizer.loadPreset(preset, 0.0);
+          console.log(`[milkdrop] init ok, preset loaded`);
+        } else {
+          console.error(`[milkdrop] init ok but NO PRESET returned for source="${source}"`);
+        }
+      } catch (err: any) {
+        console.error(`[milkdrop] init failed | errName=${err?.name} | errMessage=${err?.message}`);
+        throw err;
+      }
     },
     render(_frame: AudioFrame, width, height) {
       if (!visualizer) return;
       if (width !== w || height !== h) { w = width; h = height; visualizer.setRendererSize(w, h); }
-      visualizer.render();
+      try { visualizer.render(); }
+      catch (err: any) {
+        console.error(`[milkdrop] render threw | ${err?.name}: ${err?.message}`);
+        visualizer = null; // stop hammering on a broken state
+      }
     },
     resize(width, height) { w = width; h = height; visualizer?.setRendererSize(w, h); },
     dispose() { visualizer = null; },
