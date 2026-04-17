@@ -79,21 +79,21 @@ export default function TrackRow({
       <div
         onDoubleClick={playHere}
         onContextMenu={(e) => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY }); }}
-        className="grid grid-cols-[24px_1fr_1fr_1fr_60px_40px] gap-3 items-center px-4 py-2 text-sm rounded hover:bg-white/5 cursor-default"
+        className="grid grid-cols-[24px_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_72px_40px] gap-3 items-center px-4 py-2 text-sm rounded hover:bg-white/5 cursor-default"
       >
         <div className="text-text-muted text-right">{index + 1}</div>
         <div className="min-w-0 flex items-center gap-3">
           {track.cover_art_path ? (
-            <img src={mediaUrl(track.cover_art_path)} className="w-9 h-9 rounded" alt="" />
-          ) : <div className="w-9 h-9 rounded bg-bg-highlight" />}
+            <img src={mediaUrl(track.cover_art_path)} className="w-9 h-9 rounded flex-shrink-0" alt="" />
+          ) : <div className="w-9 h-9 rounded bg-bg-highlight flex-shrink-0" />}
           <div className="min-w-0">
             <div className="truncate text-text-primary">{track.title}</div>
             <div className="truncate text-xs text-text-muted">{track.artist ?? ''}</div>
           </div>
         </div>
-        <div className="truncate text-text-secondary">{track.album ?? ''}</div>
-        <div className="truncate text-text-muted">{track.artist ?? ''}</div>
-        <div className="text-text-muted text-right tabular-nums">{fmt(track.duration_sec)}</div>
+        <div className="min-w-0 truncate text-text-secondary">{track.album ?? ''}</div>
+        <div className="min-w-0 truncate text-text-muted">{track.artist ?? ''}</div>
+        <div className="text-text-secondary text-right tabular-nums">{fmt(track.duration_sec)}</div>
         <button
           onClick={() => toggleLike(track.id)}
           className={`text-lg ${liked ? 'text-accent' : 'text-text-muted hover:text-text-primary'}`}
