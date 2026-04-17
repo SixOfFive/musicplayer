@@ -45,32 +45,55 @@ export default function NowPlayingBar() {
       </div>
 
       <div className="flex flex-col items-center gap-1">
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3">
+          {/* Shuffle */}
           <button
             onClick={toggleShuffle}
-            className={`text-lg transition ${shuffle ? 'text-accent' : 'text-text-secondary hover:text-white'}`}
-            title={shuffle ? 'Shuffle on — click to turn off' : 'Shuffle (one-time randomization, keeps current track playing)'}
+            className={`w-9 h-9 rounded-full flex items-center justify-center transition ${
+              shuffle ? 'bg-accent/20 text-accent' : 'text-text-secondary hover:text-white'
+            }`}
+            title={shuffle ? 'Shuffle: on (one-time randomization; click to turn off)' : 'Shuffle: off'}
             aria-label="Shuffle"
           >
-            ⇄
-            {shuffle && <span className="block w-1 h-1 rounded-full bg-accent mx-auto -mt-1" />}
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M16 3h5v5" />
+              <path d="M4 20L21 3" />
+              <path d="M21 16v5h-5" />
+              <path d="M15 15l6 6" />
+              <path d="M4 4l5 5" />
+            </svg>
           </button>
+
           <button onClick={prev} className="text-text-secondary hover:text-white text-xl" title="Previous">⏮</button>
           <button
             onClick={toggle}
-            className="w-9 h-9 rounded-full bg-white text-black flex items-center justify-center hover:scale-105 transition"
+            className="w-10 h-10 rounded-full bg-white text-black flex items-center justify-center hover:scale-105 transition"
           >
             {isPlaying ? '❚❚' : '▶'}
           </button>
           <button onClick={next} className="text-text-secondary hover:text-white text-xl" title="Next">⏭</button>
+
+          {/* Repeat: always-visible loop glyph, mode badge bottom-right */}
           <button
             onClick={cycleRepeat}
-            className={`text-lg transition ${repeatMode !== 'off' ? 'text-accent' : 'text-text-secondary hover:text-white'}`}
+            className={`relative w-9 h-9 rounded-full flex items-center justify-center transition ${
+              repeatMode !== 'off' ? 'bg-accent/20 text-accent' : 'text-text-secondary hover:text-white'
+            }`}
             title={repeatTitle}
             aria-label="Repeat"
           >
-            {repeatMode === 'one' ? '🔂' : '🔁'}
-            {repeatMode !== 'off' && <span className="block w-1 h-1 rounded-full bg-accent mx-auto -mt-1" />}
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M17 2l4 4-4 4" />
+              <path d="M3 11v-1a4 4 0 0 1 4-4h14" />
+              <path d="M7 22l-4-4 4-4" />
+              <path d="M21 13v1a4 4 0 0 1-4 4H3" />
+            </svg>
+            {repeatMode === 'one' && (
+              <span className="absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full bg-accent text-black text-[10px] leading-none font-black flex items-center justify-center ring-2 ring-bg-elev-1">1</span>
+            )}
+            {repeatMode === 'all' && (
+              <span className="absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full bg-accent text-black text-[10px] leading-none font-black flex items-center justify-center ring-2 ring-bg-elev-1">∞</span>
+            )}
           </button>
         </div>
         <div className="flex items-center gap-2 w-full max-w-lg text-[11px] text-text-muted">
