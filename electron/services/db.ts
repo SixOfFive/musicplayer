@@ -1,0 +1,105 @@
+import Database from 'better-sqlite3';
+import { getSettings } from './settings-store';
+
+let db: Database.Database | null = null;
+
+export async function initDatabase(): Promise<void> {
+  const { databasePath } = getSettings().library;
+  db = new Database(databasePath);
+  db.pragma('journal_mode = WAL');
+  db.pragma('foreign_keys = ON');
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS directories (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      path TEXT NOT NULL UNIQUE,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      last_scanned_at INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS artists (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE
+    );
+
+    CREATE TABLE IF NOT EXISTS albums (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      artist_id INTEGER REFERENCES artists(id),
+      year INTEGER,
+      genre TEXT,
+      cover_art_path TEXT,
+      UNIQUE(title, artist_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS tracks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      path TEXT NOT NULL UNIQUE,
+      title TEXT NOT NULL,
+      artist_id INTEGER REFERENCES artists(id),
+      album_id INTEGER REFERENCES albums(id),
+      album_artist TEXT,
+      track_no INTEGER,
+      disc_no INTEGER,
+      year INTEGER,
+      genre TEXT,
+      duration_sec REAL,
+      bitrate INTEGER,
+      sample_rate INTEGER,
+      codec TEXT,
+      mtime INTEGER,
+      size INTEGER,
+      date_added INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album_id);
+    CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist_id);
+    CREATE INDEX IF NOT EXISTS idx_tracks_title ON tracks(title);
+
+    -- Liked songs: a boolean flag per track. The "Liked Songs" master playlist
+    -- is materialised at query time from WHERE liked = 1.
+    CREATE TABLE IF NOT EXISTS track_likes (
+      track_id INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
+      liked_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS playlists (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      description TEXT,
+      kind TEXT NOT NULL DEFAULT 'manual', -- 'manual' | 'smart'
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS playlist_tracks (
+      playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+      track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+      position INTEGER NOT NULL,
+      added_at INTEGER NOT NULL,
+      PRIMARY KEY (playlist_id, track_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_pl_tracks_order ON playlist_tracks(playlist_id, position);
+  `);
+
+  // Lightweight migrations for existing databases (idempotent).
+  const cols = db.prepare("PRAGMA table_info(albums)").all() as Array<{ name: string }>;
+  if (!cols.find((c) => c.name === 'genre')) {
+    db.exec('ALTER TABLE albums ADD COLUMN genre TEXT');
+  }
+  if (!cols.find((c) => c.name === 'art_lookup_at')) {
+    // Epoch ms when we last consulted online providers for this album's art.
+    // Used to skip re-querying albums that have no online match.
+    db.exec('ALTER TABLE albums ADD COLUMN art_lookup_at INTEGER');
+  }
+  if (!cols.find((c) => c.name === 'art_lookup_failed')) {
+    // Set to 1 when all enabled providers returned nothing.
+    db.exec('ALTER TABLE albums ADD COLUMN art_lookup_failed INTEGER DEFAULT 0');
+  }
+}
+
+export function getDb(): Database.Database {
+  if (!db) throw new Error('DB not initialized');
+  return db;
+}
