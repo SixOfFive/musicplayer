@@ -2,72 +2,69 @@ import { useEffect, useLayoutEffect, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
 
 /**
- * Remember scroll position per route path so back/forward navigation puts the
- * user back exactly where they were — no more scrolling miles through albums
- * after visiting Liked Songs.
+ * Remember scroll position per route entry so Back/Forward restores the user
+ * to exactly where they were. Keyed on `location.key` (stable for each
+ * history entry in React Router 6 — POP navigations get the old key back).
  *
- * Strategy:
- *   1. While a path is active, continuously record its scrollTop on every
- *      scroll event (rAF-throttled so we're not thrashing state).
- *   2. When the location changes, restore the saved scrollTop on the next
- *      paint. Retry a few times with short delays to handle async content
- *      (album/track lists that finish loading after render).
+ * Two phases:
+ *   1. While a route is active, every scroll event synchronously records the
+ *      container's scrollTop against the current key.
+ *   2. On route change, restore the saved scrollTop in a useLayoutEffect so
+ *      the first paint is already at the correct position, then retry a few
+ *      frames to catch content that mounts async (SQLite → render).
+ *
+ * IMPORTANT: effect cleanup does NOT save scroll. By the time React's cleanup
+ * phase runs, the browser has already updated scrollTop for the new route
+ * (usually to 0 or clamped to new content height), which would overwrite the
+ * correct value for the route we just left. We rely on the synchronous scroll
+ * listener having already captured the latest value.
  */
 
-// Module-scoped so state survives StrictMode double-mounts + persists for
-// the whole app session.
 const scrollMap = new Map<string, number>();
 
 export function useScrollRestoration(containerRef: React.RefObject<HTMLElement | null>) {
   const location = useLocation();
-  const currentPath = location.key + '|' + location.pathname + location.search;
-  const pathRef = useRef(currentPath);
+  const key = location.key;
+  const keyRef = useRef(key);
 
-  // 1) Track scroll on the active path. Re-register whenever the path changes
-  //    so the handler closes over the current key.
+  // Save on every scroll event for the current key. No rAF throttling — a
+  // Map.set is cheap, and missing the final scroll before a navigation is
+  // worse than a few microseconds of extra work during active scrolling.
   useEffect(() => {
-    pathRef.current = currentPath;
+    keyRef.current = key;
     const el = containerRef.current;
     if (!el) return;
-    let raf = 0;
-    const onScroll = () => {
-      if (raf) return;
-      raf = requestAnimationFrame(() => {
-        raf = 0;
-        scrollMap.set(pathRef.current, el.scrollTop);
-      });
-    };
+    const onScroll = () => { scrollMap.set(keyRef.current, el.scrollTop); };
     el.addEventListener('scroll', onScroll, { passive: true });
     return () => {
       el.removeEventListener('scroll', onScroll);
-      if (raf) cancelAnimationFrame(raf);
-      // Snapshot final scroll position when leaving (scroll event doesn't fire on unmount).
-      scrollMap.set(pathRef.current, el.scrollTop);
+      // NB: deliberately NOT saving scrollTop here — by cleanup time the DOM
+      // has already updated and el.scrollTop is no longer the value the user
+      // was looking at.
     };
-  }, [currentPath, containerRef]);
+  }, [key, containerRef]);
 
-  // 2) On path change, restore the remembered scrollTop. Use useLayoutEffect
-  //    so the first paint shows the correct position; retry on rAF for content
-  //    that mounts after the initial render.
+  // Restore saved position on route change. useLayoutEffect runs before paint
+  // so users never see the content at the "wrong" scroll briefly.
   useLayoutEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    const target = scrollMap.get(currentPath) ?? 0;
+    const target = scrollMap.get(key) ?? 0;
     el.scrollTop = target;
 
-    // Content often finishes loading async (IPC → SQLite → render). If the
-    // container doesn't yet have enough scrollHeight, scrollTop will clamp
-    // below our target. Retry up to ~500ms at 60fps.
+    // Content often loads async (IPC → SQLite → render). If scrollHeight
+    // hasn't grown enough yet, scrollTop clamps below target. Retry for
+    // ~500ms while the container's measured height catches up.
     let attempts = 0;
     const retry = () => {
       if (!el || attempts++ > 30) return;
-      if (el.scrollTop < target - 1 && el.scrollHeight >= target + el.clientHeight) {
+      if (Math.abs(el.scrollTop - target) > 1 && el.scrollHeight >= target + el.clientHeight) {
         el.scrollTop = target;
       }
-      if (attempts <= 30 && Math.abs(el.scrollTop - target) > 1) {
+      if (Math.abs(el.scrollTop - target) > 1 && attempts <= 30) {
         requestAnimationFrame(retry);
       }
     };
     requestAnimationFrame(retry);
-  }, [currentPath, containerRef]);
+  }, [key, containerRef]);
 }
