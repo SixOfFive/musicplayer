@@ -38,11 +38,11 @@ export default function App() {
   return (
     <div className="h-screen w-screen flex flex-col bg-black">
       <UpdateBanner />
-      <div className="flex-1 min-h-0 grid grid-cols-[260px_1fr]">
+      <div className="flex-1 min-h-0 grid grid-cols-[260px_minmax(0,1fr)]">
         <Sidebar />
-        <div className="flex flex-col min-h-0 bg-bg-base rounded-tl-lg">
+        <div className="flex flex-col min-h-0 min-w-0 bg-bg-base rounded-tl-lg">
           <TopBar />
-          <div ref={mainRef} className="flex-1 min-h-0 overflow-y-auto">
+          <div ref={mainRef} className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden">
             <Routes>
               <Route path="/" element={<Home />} />
               <Route path="/library" element={<LibraryView />} />
