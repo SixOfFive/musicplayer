@@ -6,7 +6,13 @@ export default function LibrarySettings() {
   const [dirs, setDirs] = useState<Dir[]>([]);
   const [dbPath, setDbPath] = useState('');
   const [cachePath, setCachePath] = useState('');
+  const [artStorage, setArtStorage] = useState<'cache' | 'album-folder'>('cache');
+  const [artFilename, setArtFilename] = useState('cover');
   const [allowDelete, setAllowDelete] = useState(false);
+  const [plExportEnabled, setPlExportEnabled] = useState(true);
+  const [plExportFolder, setPlExportFolder] = useState('');
+  const [plPathStyle, setPlPathStyle] = useState<'absolute' | 'relative'>('absolute');
+  const [plExportLiked, setPlExportLiked] = useState(true);
   const [scanProgress, setScanProgress] = useState<{ phase: string; processed: number; seen: number; msg: string | null } | null>(null);
 
   async function refresh() {
@@ -15,7 +21,14 @@ export default function LibrarySettings() {
     const s = await window.mp.settings.get();
     setDbPath(s.library.databasePath);
     setCachePath(s.library.coverArtCachePath);
+    setArtStorage(s.library.coverArtStorage ?? 'cache');
+    setArtFilename(s.library.coverArtFilename ?? 'cover');
     setAllowDelete(!!s.library.allowFileDeletion);
+    const pe = s.playlistExport ?? { enabled: true, folder: '', pathStyle: 'absolute', exportLiked: true };
+    setPlExportEnabled(!!pe.enabled);
+    setPlExportFolder(pe.folder ?? '');
+    setPlPathStyle(pe.pathStyle ?? 'absolute');
+    setPlExportLiked(!!pe.exportLiked);
   }
   useEffect(() => { refresh(); }, []);
 
@@ -75,11 +88,149 @@ export default function LibrarySettings() {
       </div>
 
       <div>
-        <h2 className="text-lg font-semibold mb-1">Database & cache</h2>
-        <div className="bg-bg-elev-2 rounded p-4 space-y-2 text-sm">
-          <div><span className="text-text-muted">Library DB:</span> <span className="font-mono">{dbPath}</span></div>
-          <div><span className="text-text-muted">Cover art cache:</span> <span className="font-mono">{cachePath}</span></div>
-          <p className="text-xs text-text-muted">Changing these paths will be supported in a later build. They live under your OS app-data dir today.</p>
+        <h2 className="text-lg font-semibold mb-1">Database & cover art</h2>
+        <div className="bg-bg-elev-2 rounded p-4 space-y-4 text-sm">
+          <div>
+            <div><span className="text-text-muted">Library DB:</span> <span className="font-mono">{dbPath}</span></div>
+            <div><span className="text-text-muted">Cover art cache:</span> <span className="font-mono">{cachePath}</span></div>
+            <p className="text-xs text-text-muted mt-1">Changing these paths will be supported in a later build.</p>
+          </div>
+
+          <div className="pt-3 border-t border-white/5">
+            <div className="font-medium mb-2">Where should new cover art be saved?</div>
+            <label className="flex items-start gap-2 mb-2 cursor-pointer">
+              <input
+                type="radio"
+                name="art-storage"
+                className="mt-1"
+                checked={artStorage === 'cache'}
+                onChange={async () => {
+                  setArtStorage('cache');
+                  await window.mp.settings.set({ library: { coverArtStorage: 'cache' } } as any);
+                }}
+              />
+              <span>
+                <span className="font-medium">App cache folder</span>
+                <p className="text-xs text-text-muted mt-0.5">
+                  Stored under your OS app-data dir. Your music folders are never written to.
+                </p>
+              </span>
+            </label>
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input
+                type="radio"
+                name="art-storage"
+                className="mt-1"
+                checked={artStorage === 'album-folder'}
+                onChange={async () => {
+                  setArtStorage('album-folder');
+                  await window.mp.settings.set({ library: { coverArtStorage: 'album-folder' } } as any);
+                }}
+              />
+              <span>
+                <span className="font-medium">Alongside the audio files</span>
+                <p className="text-xs text-text-muted mt-0.5">
+                  Saves as <code className="font-mono">{artFilename}.jpg</code> in the album's folder.
+                  This is the layout Jellyfin, Plex, MusicBee and foobar2000 all read from — your art travels with your collection.
+                  If a folder isn't writable (e.g. read-only share), falls back to the app cache.
+                </p>
+              </span>
+            </label>
+
+            {artStorage === 'album-folder' && (
+              <div className="mt-3 flex items-center gap-2">
+                <label className="text-xs text-text-muted w-24">Filename</label>
+                <input
+                  value={artFilename}
+                  onChange={(e) => setArtFilename(e.target.value.replace(/[^a-zA-Z0-9._-]/g, ''))}
+                  onBlur={async () => {
+                    await window.mp.settings.set({ library: { coverArtFilename: artFilename || 'cover' } } as any);
+                  }}
+                  className="bg-bg-base px-2 py-1 rounded text-xs font-mono w-32"
+                  placeholder="cover"
+                />
+                <span className="text-xs text-text-muted">
+                  .jpg / .png (extension picked from the image type)
+                </span>
+              </div>
+            )}
+
+            <p className="text-xs text-text-muted mt-3">
+              Only affects cover art saved <em>from now on</em>. Existing art isn't moved. Run a rescan to re-extract embedded art into the new location.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <h2 className="text-lg font-semibold mb-1">Playlist export (.m3u8)</h2>
+        <p className="text-sm text-text-muted mb-3">
+          Playlists are written as universal <code className="font-mono">.m3u8</code> files — the same format Jellyfin,
+          foobar2000, MusicBee, VLC, Plex, Navidrome and every Android music player understand.
+          The <strong>Liked Songs</strong> list is also exported automatically.
+          Any <code className="font-mono">.m3u8</code> files found in this folder on startup are imported
+          as new playlists (existing ones are never overwritten).
+        </p>
+        <div className="bg-bg-elev-2 rounded p-4 space-y-3 text-sm">
+          <label className="flex items-start gap-2">
+            <input
+              type="checkbox" className="mt-1"
+              checked={plExportEnabled}
+              onChange={async (e) => {
+                setPlExportEnabled(e.target.checked);
+                await window.mp.settings.set({ playlistExport: { enabled: e.target.checked } } as any);
+              }}
+            />
+            <span><span className="font-medium">Write playlists to disk</span></span>
+          </label>
+
+          <div>
+            <label className="text-xs text-text-muted">Export folder (leave blank for auto: <code className="font-mono">&lt;music folder&gt;/Playlists</code>)</label>
+            <div className="flex gap-2 mt-1">
+              <input
+                value={plExportFolder}
+                onChange={(e) => setPlExportFolder(e.target.value)}
+                onBlur={async () => {
+                  await window.mp.settings.set({ playlistExport: { folder: plExportFolder.trim() } } as any);
+                }}
+                className="flex-1 bg-bg-base px-2 py-1 rounded text-xs font-mono"
+                placeholder="Auto — will use <music folder>/Playlists"
+              />
+              <button
+                onClick={async () => {
+                  const d = await window.mp.library.pickDir();
+                  if (!d) return;
+                  setPlExportFolder(d);
+                  await window.mp.settings.set({ playlistExport: { folder: d } } as any);
+                }}
+                className="bg-white/10 hover:bg-white/20 px-3 py-1 rounded text-xs"
+              >Pick…</button>
+            </div>
+          </div>
+
+          <div>
+            <div className="text-xs text-text-muted mb-1">Path style in playlists</div>
+            <label className="inline-flex items-center gap-2 mr-4">
+              <input type="radio" name="plpath" checked={plPathStyle === 'absolute'} onChange={async () => { setPlPathStyle('absolute'); await window.mp.settings.set({ playlistExport: { pathStyle: 'absolute' } } as any); }} />
+              Absolute
+            </label>
+            <label className="inline-flex items-center gap-2">
+              <input type="radio" name="plpath" checked={plPathStyle === 'relative'} onChange={async () => { setPlPathStyle('relative'); await window.mp.settings.set({ playlistExport: { pathStyle: 'relative' } } as any); }} />
+              Relative (portable)
+            </label>
+          </div>
+
+          <label className="flex items-start gap-2">
+            <input
+              type="checkbox" className="mt-1"
+              checked={plExportLiked}
+              onChange={async (e) => {
+                setPlExportLiked(e.target.checked);
+                await window.mp.settings.set({ playlistExport: { exportLiked: e.target.checked } } as any);
+              }}
+            />
+            <span>Also export Liked Songs as <code className="font-mono">Liked Songs.m3u8</code></span>
+          </label>
         </div>
       </div>
 

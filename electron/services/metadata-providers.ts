@@ -12,10 +12,7 @@
 //   - AcoustID/Chromaprint (key + fpcalc binary)
 //   - AccurateRip / CUETools DB (lossless-only rip verification)
 
-import path from 'node:path';
-import fs from 'node:fs/promises';
-import { getSettings } from './settings-store';
-import { getDb } from './db';
+import { saveAlbumArt } from './cover-art';
 import type { MetadataProviderId } from '../../shared/types';
 
 const USER_AGENT = 'MusicPlayer/0.1 (personal; +https://github.com/sixoffive/musicplayer)';
@@ -206,15 +203,11 @@ export async function enrichReleaseMetadata(
 }
 
 /**
- * Save fetched art to the cover cache and update the album row.
+ * Save fetched art to disk (cache dir or alongside the audio, per user setting)
+ * and update the album row. Thin wrapper — logic lives in services/cover-art.ts.
  */
-export async function persistAlbumArt(albumId: number, art: ArtFetchResult): Promise<string> {
-  const settings = getSettings();
-  const ext = (art.mimeType.split('/')[1] ?? 'jpg').replace(/[^a-z0-9]/gi, '') || 'jpg';
-  const file = path.join(settings.library.coverArtCachePath, `album_${albumId}.${ext}`);
-  await fs.writeFile(file, Buffer.from(art.bytes));
-  getDb().prepare('UPDATE albums SET cover_art_path = ? WHERE id = ?').run(file, albumId);
-  return file;
+export async function persistAlbumArt(albumId: number, art: ArtFetchResult): Promise<string | null> {
+  return saveAlbumArt(albumId, art.bytes, art.mimeType);
 }
 
 // --- Test endpoints (used by Settings "Test connection" button) --------------

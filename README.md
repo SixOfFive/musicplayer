@@ -2,183 +2,196 @@
 
 A personal, local-first music player with a Spotify-style interface — Electron + React + TypeScript desktop app for Windows, macOS and Linux (including KDE Plasma).
 
-## What's in here
+## Quick start
 
-This is a scaffold. The architecture and every major subsystem is wired; most "happy paths" work. Expect stubs where noted.
+**Windows:** double-click `run.bat` (or run it from a terminal).
+**macOS / Linux:** `./run.sh` from the project root.
 
-### Features scaffolded
+Both scripts check for Node (>=18) + npm, install dependencies on first run, rebuild native modules against Electron's ABI, verify the bundled `ffmpeg` binary is present, then launch the dev environment.
 
-- **Spotify-style UI** — left sidebar (navigation + playlists), top bar (back/forward, search), main content, bottom now-playing bar.
-- **Local library** — SQLite (via `better-sqlite3`), with tables for tracks/albums/artists/directories/playlists/likes. Recursive folder scan reading ID3/Vorbis/APE/MP4 tags via `music-metadata`.
-- **Out-of-the-box codecs** — see [Supported audio formats](#supported-audio-formats) below.
-- **First-run welcome picker** — defaults to the OS-standard music folder (`~/Music` on macOS, `%USERPROFILE%\Music` on Windows, XDG `MUSIC` on Linux/KDE).
-- **Playlists** — manual create/rename/delete, reorder IPC, and an auto-populated **Liked Songs** master playlist. Right-click any track for an "Add to…" menu.
-- **Sortable lists** — tracks and albums sort by title/artist/album/year/genre/duration/track #/date added, ascending or descending.
-- **Genre & year** — stored per track (from tags) and per album (promoted from the first track). Genre filter in the Albums view.
-- **Safe deletion** — off by default. When enabled in Settings, right-click offers "Delete file" which uses `shell.trashItem` (cross-platform move-to-trash). Library-only removal is always available.
-- **Real-time audio analysis bus** — a shared `AudioEngine` wraps the HTMLAudioElement through an `AnalyserNode` and produces `AudioFrame` objects every animation frame with:
-  - raw FFT bins (bytes + floats),
-  - time-domain waveform,
-  - band energies (bass/mid/treble/loudness),
-  - onset-based beat detection with a rolling BPM estimate and beat-phase.
-- **Visualizer with a pluggable backend API** — see [Visualizers & plugins](#visualizers--plugins) below.
-- **Settings UI** with four tabs:
-  - *Library* — add/remove music folders, view scan progress, DB & cover-art cache paths, toggle for destructive file operations.
-  - *Scanning & Metadata* — incremental vs full, cover-art fetching, write-back-tags toggle, file extensions list, per-provider toggles + API key entry + connection test.
-  - *Visualizer* — target FPS, beat sensitivity, smoothing, fullscreen-on-play, plugin search folders, active plugin selector.
-  - *Playback* — crossfade, ReplayGain mode.
-
-## Running
+Manual:
 
 ```bash
-npm install
-npm run rebuild         # build better-sqlite3 against Electron's Node ABI
-npm run electron:dev    # Vite + Electron in parallel
+npm install                 # installs deps + rebuilds better-sqlite3 for Electron ABI
+npm run electron:dev        # Vite + Electron in parallel
+npm run electron:build      # produces platform installer via electron-builder
 ```
 
-Build installers:
+## Features
 
-```bash
-npm run electron:build  # platform installer via electron-builder
-```
+### Library
+- **Recursive scan** of one or more music folders with a 4Hz progress panel (phase, throughput, GB scanned, ETA, current file)
+- **Tag reading** via `music-metadata` — ID3v1/v2.3/v2.4 (MP3, WAV), Vorbis Comments (FLAC, OGG, OPUS), APE, iTunes MP4 atoms (M4A/AAC), ASF (WMA)
+- **Embedded cover art** extracted on scan, cached or written alongside audio (configurable)
+- **Online cover art** fetched in the background after tag scan from: MusicBrainz → Cover Art Archive → Deezer — rate-limited per provider, cached, retries on manual rescan
+- **Incremental scanning** — tracks unchanged by mtime+size are skipped; albums already marked "not found online" stay skipped unless touched
+- **Startup resume** — if app was closed mid-art-fetch, resumes automatically on next launch
+- **Live refresh** — Albums/Home/Library/Artist views re-fetch as covers land, without polling
 
-## Supported audio formats
+### Playback
+- Double-click a track → plays with the visible list as queue
+- Hover an album card → Spotify-style green ▶ play button
+- Album detail page: big cover, title/artist/year/genre/runtime, big Play button, full track list
+- Artist detail page: every album of theirs + every track, Play All button
+- Scrubber with seek support (HTTP Range requests through custom `mp-media` protocol via Electron's `net.fetch`)
+- Volume, prev/next, heart-to-like, now-playing bar persistent across views
 
-Out of the box the scanner looks for these extensions (configurable in Settings → Scanning & Metadata → File extensions):
+### Playlists (universal .m3u8 format)
+- **Left-sidebar "Playlists" tab** → dedicated grid view with Export-all / Import-from-folder buttons
+- **Auto-export on every edit** — creating, renaming, adding/removing/reordering tracks, and liking/unliking all write a `.m3u8` immediately
+- **Startup import** — any `.m3u8` in the export folder that isn't already in the DB gets loaded as a new playlist
+- **Liked Songs** is a virtual playlist (backed by `track_likes` table) that also exports as `Liked Songs.m3u8`
+- Playlist format: `#EXTM3U` + `#EXTINF:<sec>,<artist> - <title>` — readable by foobar2000, MusicBee, VLC, Winamp, Jellyfin, Plex, Navidrome, iTunes, and every Android music player
+- Path style selectable: absolute (default) or relative (portable with the music tree)
+- Default location: `<firstMusicFolder>/Playlists/` → falls back to `userData/Playlists`
 
-| Ext | Container / codec | Tag format read | Playback | Notes |
-|---|---|---|---|---|
-| `.mp3` | MPEG-1 Layer III | ID3v1, ID3v2.3, ID3v2.4 | ✅ | Standard. |
-| `.flac` | FLAC (lossless) | Vorbis Comments | ✅ | Full lossless support. |
-| `.wav` | RIFF/WAV (PCM) | ID3, LIST INFO | ✅ | Uncompressed PCM. Tags optional. |
-| `.m4a` | MPEG-4 / AAC or ALAC | iTunes MP4 atoms | ✅ | Apple Lossless (ALAC) and AAC both supported. |
-| `.aac` | raw ADTS AAC | ID3v2 | ✅ | |
-| `.ogg` | Ogg Vorbis | Vorbis Comments | ✅ | |
-| `.opus` | Ogg Opus | Vorbis Comments | ✅ | |
-| `.wma` | Windows Media Audio | ASF | ⚠️ | Electron's Chromium plays WMA on Windows builds; Linux/macOS builds of Chromium ship without the proprietary decoder. Tags still read on all platforms.|
+### Track & album views
+- **Right-click any track row** for a context menu: Play, Like, Add to playlist (any existing or + new), Remove from library, optionally Delete file (gated by a setting — uses `shell.trashItem`)
+- **Sortable columns** on tracks and albums (title / artist / album / year / genre / duration / track # / date added)
+- **Genre filter** on the Albums view
+- **Artist search + sort** on the Artists view
 
-Less common formats the tag parser (`music-metadata`) can read but that aren't enabled by default — add them in Settings if you use them:
+### Statistics & fun facts
+- **Every play is recorded**: per-track `play_count`, `last_played_at`, `total_listened_sec` + individual `play_events` for time-series
+- Sessions with < 5 sec of audio are discarded as noise
+- **Home screen** surfaces:
+  - 6 stat tiles: tracks / albums / artists / library size / total runtime / playlists+likes
+  - Purple "fun fact" card that auto-rotates every 12s (click to cycle manually) with 20+ facts generated from the library and play history:
+    - Back-to-back playback time, top genre, year span, chunkiest album, longest track, cover-art coverage
+    - Hours listened today / this week / this month / this year / last 30 days
+    - Active day count, average per day, current + longest listening streaks
+    - Most-musical hour of the day, biggest day of the week
+    - Most-played track / artist / album / genre
+    - Unique artists sampled, % of library played, longest continuous session, session count + average
+    - Biggest single listening day, first track ever played
+  - Recently-added strip + Your albums grid
 
-- `.aiff` / `.aif` — AIFF (PCM or compressed), ID3 tags
-- `.aifc` — compressed AIFF
-- `.mpc` / `.mp+` — Musepack, APE tags
-- `.wv` — WavPack, APE tags
-- `.ape` — Monkey's Audio, APE tags
-- `.dsf` / `.dff` — DSD Stream File / DSDIFF, DSD tags
-- `.mka` — Matroska audio, Matroska tags
-- `.webm` — audio-only WebM
-- `.tak` — Tom's lossless Audio Kompressor
-- `.tta` — True Audio
+### Visualizer
+- **Pluggable backend API** — every backend consumes an `AudioFrame` bus with FFT bins, waveform, bass/mid/treble energies, beat flag + intensity, running BPM
+- **5 built-in visualizers** (Canvas2D, zero deps): Spectrum Bars, Mirror Bars, Oscilloscope, Radial Spectrum, Beat Particles
+- **20 bundled Milkdrop presets** via `butterchurn` (WebGL port of Milkdrop 2) — classic Geiss, Flexi, Aderrasi, Rovastar, etc.
+- **User plugins**: drop `.milk` files into any folder listed in Settings → Visualizer → Plugin folders
+- **Winamp `.dll` plugins**: listed but marked unloadable. A Windows-only FFI bridge (`node-ffi-napi`) is scaffolded under the `native-winamp` backend kind — not implemented.
 
-Note: tag reading ≠ playback. Adding `.ape` or `.mpc` to the extensions list lets the scanner index those files, but Electron/Chromium has no built-in decoder for them — they'd scan but fail to play. mp3/wav/flac/m4a/aac/ogg/opus play everywhere.
+### FLAC → MP3 conversion ("Shrink albums")
+- **Button on AlbumView** for any album with FLAC tracks ≥ 20 MB
+- **Yellow 🗜 badge on album cards** when the album is above the 66th-percentile size in your library (configurable percentile slider in Settings)
+- Uses bundled **ffmpeg** (via `ffmpeg-static`) with `libmp3lame`
+- Quality options: **VBR V0** (~245 kbps, archival — default), V2 (~190), CBR 320, CBR 256
+- Preserves all tags (`-map_metadata 0`) and embedded cover art (`-map 0:v? -c:v copy`)
+- **Safety**: refuses to overwrite existing MP3s, verifies every output is present and >= 30 KB, and only removes FLACs after *all* new MP3s verify. Originals go to the system trash by default (toggle-able)
+- Progress bar, cancellation, and DB path/codec/size updates in a single transaction at the end
+
+### Settings (five tabs)
+- **Library** — folders, scan progress, database/cache paths, cover art storage (app cache *or* alongside audio files as `cover.jpg` / `folder.jpg`), playlist export folder + path style, destructive-ops gate
+- **Scanning & Metadata** — incremental, fetch cover art, write-back tags, file extensions list, per-provider toggles + API keys + connection test
+- **Visualizer** — target FPS, beat sensitivity, smoothing, fullscreen-on-play, plugin search folders, active plugin picker
+- **Playback** — crossfade, ReplayGain mode
+- **Shrink albums** — enable, MP3 quality, size-percentile threshold, trash vs. permanent delete
 
 ## Storage & standards
 
-- **Music folder default** — `app.getPath('music')`, which returns:
+- **Music folder default** — `app.getPath('music')`:
   - macOS: `~/Music`
-  - Linux (including KDE Plasma): XDG `XDG_MUSIC_DIR` (typically `~/Music`)
-  - Windows: the "Music" shell known folder (`%USERPROFILE%\Music` by default)
-- **Library database & cover-art cache** — `app.getPath('userData')`:
-  - macOS: `~/Library/Application Support/MusicPlayer/library.db`
-  - Linux: `~/.config/MusicPlayer/library.db`
-  - Windows: `%APPDATA%\MusicPlayer\library.db`
-- **Tag standards read** — ID3v1/v2.3/v2.4 (MP3, WAV), Vorbis Comments (FLAC, OGG, OPUS), APE (MPC, WavPack), iTunes MP4 atoms (M4A/AAC), ASF (WMA).
-- **Cover art** — embedded art is extracted and cached as `album_<id>.<ext>`. When embedded art is missing, the scan providers in Settings are consulted in order.
+  - Linux (KDE/GNOME): XDG `XDG_MUSIC_DIR` (usually `~/Music`)
+  - Windows: `%USERPROFILE%\Music`
+- **Library DB & cover-art cache** — `app.getPath('userData')`:
+  - macOS: `~/Library/Application Support/MusicPlayer/`
+  - Linux: `~/.config/MusicPlayer/`
+  - Windows: `%APPDATA%\MusicPlayer\`
+- **Playlist export** — `<firstMusicFolder>/Playlists/` (configurable). Any `.m3u8` already there on startup imports as new playlists.
+- **Cover art alongside audio** (optional) — `cover.jpg` (filename configurable) in each album folder. Compatible with Jellyfin/Plex/foobar/MusicBee/Navidrome conventions.
+
+## Supported audio formats
+
+Enabled by default:
+
+| Ext | Container / codec | Tag format | Playback | Notes |
+|---|---|---|---|---|
+| `.mp3` | MPEG-1 Layer III | ID3v1, ID3v2 | ✅ | |
+| `.flac` | FLAC | Vorbis Comments | ✅ | Lossless. Candidate for MP3 shrink. |
+| `.wav` | RIFF/WAV (PCM) | ID3, LIST INFO | ✅ | |
+| `.m4a` | MPEG-4 / AAC or ALAC | iTunes MP4 atoms | ✅ | |
+| `.aac` | raw ADTS AAC | ID3v2 | ✅ | |
+| `.ogg` | Ogg Vorbis | Vorbis Comments | ✅ | |
+| `.opus` | Ogg Opus | Vorbis Comments | ✅ | |
+| `.wma` | Windows Media Audio | ASF | ⚠ Windows only | Chromium's non-Windows builds ship without the WMA decoder. |
+
+Also readable by the tag parser if you add them to the extensions list (scan-only — Electron can't play them without a native decoder): `.aiff` / `.aif`, `.mpc`, `.wv`, `.ape`, `.dsf` / `.dff`, `.mka`, `.webm`, `.tak`, `.tta`.
 
 ## Metadata & integrity providers
 
-Configured per-provider in Settings → Scanning & Metadata. All are free to use; some need a free API key.
+Configured in Settings → Scanning & Metadata. All free; some need a free API key.
 
-| Provider | What it gives | Key |
-|---|---|---|
-| **MusicBrainz** | Canonical artist/album/track IDs (MBIDs), release metadata | No (rate-limited 1 req/s) |
-| **Cover Art Archive** | Front/back cover art keyed to MBIDs | No |
-| **Last.fm** | Artist bios, similar artists, play counts, secondary art | Free key |
-| **Discogs** | Physical-media metadata (labels, catalogs), cover art | Free token |
-| **Deezer** | Fast 1000×1000 album art via public search API | No |
-| **AcoustID / Chromaprint** | Fingerprint → MusicBrainz match for tag-less files | Free key + `fpcalc` |
-| **AccurateRip** | Per-track CRC32 of decoded audio samples for verified CD rips | No |
-| **CUETools DB (CTDB)** | Alternative CRC/verification DB with wider coverage | No |
+| Provider | What it gives | Key | Wired |
+|---|---|---|---|
+| MusicBrainz | Canonical artist/album/track IDs (MBIDs), release metadata | No | Yes |
+| Cover Art Archive | Front/back cover art keyed to MBIDs | No | Yes |
+| Deezer | 1000×1000 album art via public search API | No | Yes |
+| Last.fm | Bios, similar artists, scrobble counts | Free key | Stub |
+| Discogs | Physical-media metadata, cover art | Free token | Stub |
+| AcoustID / Chromaprint | Fingerprint → MusicBrainz match for tag-less files | Free key + `fpcalc` | Stub |
+| AccurateRip | Per-track CRC32 of decoded audio samples for verified CD rips | No | Stub |
+| CUETools DB (CTDB) | Alternative CRC/verification DB, wider coverage | No | Stub |
 
-AccurateRip and CTDB are the answer to *"is there an online catalog with CRC checks for songs/albums?"* — yes: they're the databases EAC, dBpoweramp and XLD query, and both expose simple HTTP endpoints. Only meaningful for lossless files (flac/wav/aiff).
+All providers go through per-provider `SerialRateLimiter` instances so the scan never bursts against anyone's API.
 
-## Visualizers & plugins
-
-### Architecture
-
-```
-<audio>  ─►  MediaElementSource  ─►  AnalyserNode  ─►  GainNode  ─►  destination
-                                        │
-                                        └── getByte*Data every rAF ─► AudioFrame bus
-                                                                           │
-                                                                           ▼
-                        ┌─────────────────────────────────────────────────────────┐
-                        │  VisualizerHost (canvas)                                │
-                        │    loads one backend at a time:                         │
-                        │      builtin   →  src/visualizer/backends/builtin.ts    │
-                        │      milkdrop  →  butterchurn (WebGL)                   │
-                        │      avs       →  (stub)                                │
-                        │      native-winamp  →  (stub, Windows-only bridge)      │
-                        └─────────────────────────────────────────────────────────┘
-```
-
-Every backend implements the same `VisualizerBackend` interface (see `src/visualizer/plugin-api.ts`) and receives an `AudioFrame` each animation frame. That frame already contains FFT bins, waveform, bass/mid/treble energies, a `beat` flag with `beatIntensity`, and a running `bpm` — so plugins can sync to the beat without running their own DSP.
-
-### Winamp plugin reality
-
-Classic Winamp visualization plugins (`vis_*.dll`) are Windows-native C/C++ binaries built against the Winamp SDK. They can't be loaded by Electron/React directly, and they don't work on macOS or Linux at all. The practical path is:
-
-- **Milkdrop presets (`.milk`)** — *the* iconic Winamp visualizer format — **are supported cross-platform** via [butterchurn](https://github.com/jberg/butterchurn), a WebGL port of Milkdrop 2. Drop `.milk` files in any folder listed under Settings → Visualizer → Plugin folders.
-- **AVS presets** — possible via a JS port; backend not implemented yet.
-- **Native `vis_*.dll`** — the app *lists* them (so you can see they're present) but marks them unloadable. A future Windows-only bridge using `node-ffi-napi` could call into the Winamp vis API; the `native-winamp` backend kind is reserved for that.
-
-### Built-ins
-
-`Spectrum Bars`, `Mirror Bars`, `Oscilloscope`, `Radial Spectrum`, `Beat Particles` — all Canvas2D, no external assets.
-
-### Bundled sample Milkdrop presets
-
-20 classic Milkdrop presets ship as test plugins out of the box (Martin, Flexi, Geiss, Aderrasi, Fishbrane, Rovastar, Zylot, …). They're resolved from the `butterchurn-presets` npm package at runtime.
+AccurateRip + CTDB exist specifically to answer *"is there a free online catalog with CRC checks for songs/albums?"* — yes, the same databases EAC, dBpoweramp, and XLD use. Verification panel is not yet wired into the UI.
 
 ## Project layout
 
 ```
-electron/          Main process
-  main.ts          Window, protocol, IPC registration
-  preload.ts       contextBridge → window.mp
+electron/                   Main process
+  main.ts                   Window, protocol, IPC registration, startup jobs
+  preload.ts                contextBridge → window.mp
   services/
-    db.ts          better-sqlite3 schema
-    settings-store.ts
+    db.ts                   better-sqlite3 schema + migrations
+    settings-store.ts       JSON persistence + deep-merge
+    cover-art.ts            Central save-album-art helper (cache or album folder)
+    metadata-providers.ts   MB / CAA / Deezer with throttling
+    ffmpeg.ts               Wraps ffmpeg-static for MP3 conversion
+    playlist-export.ts      M3U8 write / parse / import orchestrator
   ipc/
-    library.ts     tracks/albums/artists/search/sort/delete
-    scan.ts        recursive walk + music-metadata
-    metadata.ts    provider list + test endpoints
-    playlists.ts   playlists + likes
-    settings.ts    get/set
-    visualizer.ts  plugin discovery (built-in + bundled Milkdrop + user folders)
+    library.ts              tracks / albums / artists / stats / delete / artist detail
+    scan.ts                 Recursive walk + tag parse + background art fetch
+    metadata.ts             Provider list + test endpoints
+    playlists.ts            Playlists + likes (auto-exports on every write)
+    convert.ts              FLAC→MP3 per-album pipeline with progress events
+    stats.ts                Play events + overview aggregations
+    settings.ts             get/set
+    visualizer.ts           Plugin discovery (built-in + bundled Milkdrop + user dirs)
 shared/
-  types.ts         shared TypeScript types + IPC channel names
+  types.ts                  Shared TS types + IPC channel names
 src/
-  audio/
-    AudioEngine.ts single engine instance (AnalyserNode + beat/BPM)
+  audio/AudioEngine.ts      AnalyserNode + beat/BPM detection
   visualizer/
-    plugin-api.ts  backend contract + registry
-    host.ts        VisualizerHost (canvas lifecycle + rAF loop)
-    backends/
-      builtin.ts   Canvas2D built-ins
-      milkdrop.ts  butterchurn wrapper
-  store/           Zustand stores (player, library)
-  components/      Sidebar, TopBar, NowPlayingBar, TrackRow, FirstRun, SortHeader
-  views/           Home, Library, Albums, Artists, Playlist, Visualizer
-    settings/      LibrarySettings, ScanSettings, VisualizerSettings, PlaybackSettings
+    plugin-api.ts           Backend contract + factory registry
+    host.ts                 Canvas lifecycle + rAF loop
+    backends/builtin.ts     Canvas2D built-ins
+    backends/milkdrop.ts    butterchurn wrapper
+  store/                    Zustand (player, library)
+  hooks/                    useScanProgress, useLibraryRefresh
+  lib/mediaUrl.ts           Build mp-media:// URLs
+  components/               Sidebar, TopBar, NowPlayingBar, TrackRow, AlbumCard,
+                            FirstRun, SortHeader, ScanProgressPanel, ArtStatusStrip,
+                            LibraryStatsPanel, ShrinkAlbumButton
+  views/                    Home, Library, Albums, Album (detail), Artists,
+                            Artist (detail), Playlist, Playlists, Visualizer,
+                            Settings/*
+scripts/
+  inspect-db.mjs            Diagnostic helper (run via electron-as-node)
+  test-walk.mjs             Walk test harness
+  test-parse.mjs            music-metadata smoke test
+run.bat / run.sh            First-run installer + dev launcher
 ```
 
-## Roadmap / obvious next steps
+## Roadmap
 
-- Wire the metadata providers into the scan pipeline (interfaces exist; HTTP calls are stubbed).
-- Drag-and-drop playlist reordering (the IPC is ready).
-- Album detail view with play-all.
-- MPRIS bridge for KDE Plasma media controls; `MediaSession` API for macOS Now Playing.
-- Fingerprint-based track identification via Chromaprint.
-- AccurateRip / CTDB verification panel on album detail view.
-- Optional Windows-only `node-ffi-napi` bridge for native `vis_*.dll` plugins.
+- Wire Last.fm / Discogs / AcoustID provider HTTP bodies (interfaces exist; stubs in `metadata-providers.ts`)
+- AccurateRip / CTDB verification panel on album detail view
+- Drag-and-drop playlist reordering (IPC is ready)
+- MPRIS D-Bus bridge for KDE Plasma media controls
+- macOS MediaSession Now Playing widget
+- Lyrics panel (plain `.lrc` file alongside audio)
+- AVS preset backend (JS port exists)
+- Optional Windows-only `node-ffi-napi` bridge for native Winamp `vis_*.dll` plugins

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { usePlayer } from '../store/player';
 import { useLibrary } from '../store/library';
 import { LIKED_PLAYLIST_ID } from '../../shared/types';
+import { mediaUrl } from '../lib/mediaUrl';
 
 export interface RowTrack {
   id: number;
@@ -11,6 +12,7 @@ export interface RowTrack {
   album: string | null;
   duration_sec: number | null;
   cover_art_path?: string | null;
+  size?: number;
 }
 
 function fmt(sec: number | null) {
@@ -82,7 +84,7 @@ export default function TrackRow({
         <div className="text-text-muted text-right">{index + 1}</div>
         <div className="min-w-0 flex items-center gap-3">
           {track.cover_art_path ? (
-            <img src={`mp-media:///${encodeURIComponent(track.cover_art_path)}`} className="w-9 h-9 rounded" alt="" />
+            <img src={mediaUrl(track.cover_art_path)} className="w-9 h-9 rounded" alt="" />
           ) : <div className="w-9 h-9 rounded bg-bg-highlight" />}
           <div className="min-w-0">
             <div className="truncate text-text-primary">{track.title}</div>

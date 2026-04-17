@@ -4,11 +4,15 @@ import Sidebar from './components/Sidebar';
 import TopBar from './components/TopBar';
 import NowPlayingBar from './components/NowPlayingBar';
 import FirstRun from './components/FirstRun';
+import ArtStatusStrip from './components/ArtStatusStrip';
 import Home from './views/Home';
 import LibraryView from './views/LibraryView';
 import AlbumsView from './views/AlbumsView';
+import AlbumView from './views/AlbumView';
 import ArtistsView from './views/ArtistsView';
+import ArtistView from './views/ArtistView';
 import PlaylistView from './views/PlaylistView';
+import PlaylistsView from './views/PlaylistsView';
 import Settings from './views/Settings';
 import Visualizer from './views/Visualizer';
 import { useLibrary } from './store/library';
@@ -38,7 +42,10 @@ export default function App() {
               <Route path="/" element={<Home />} />
               <Route path="/library" element={<LibraryView />} />
               <Route path="/albums" element={<AlbumsView />} />
+              <Route path="/album/:id" element={<AlbumView />} />
               <Route path="/artists" element={<ArtistsView />} />
+              <Route path="/artist/:id" element={<ArtistView />} />
+              <Route path="/playlists" element={<PlaylistsView />} />
               <Route path="/playlist/:id" element={<PlaylistView />} />
               <Route path="/visualizer" element={<Visualizer />} />
               <Route path="/settings" element={<Settings />} />
@@ -48,6 +55,7 @@ export default function App() {
           </div>
         </div>
       </div>
+      <ArtStatusStrip />
       <NowPlayingBar />
       {showFirstRun && <FirstRun onDone={() => setShowFirstRun(false)} />}
     </div>

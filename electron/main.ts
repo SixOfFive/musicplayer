@@ -1,21 +1,36 @@
-import { app, BrowserWindow, ipcMain, dialog, protocol } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, protocol, net } from 'electron';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { registerSettingsIpc } from './ipc/settings';
 import { registerLibraryIpc } from './ipc/library';
-import { registerScanIpc } from './ipc/scan';
+import { registerScanIpc, setProgressWindow, resumeArtFetchOnStartup } from './ipc/scan';
 import { registerVisualizerIpc } from './ipc/visualizer';
 import { registerMetadataIpc } from './ipc/metadata';
 import { registerPlaylistsIpc } from './ipc/playlists';
+import { registerStatsIpc } from './ipc/stats';
+import { registerConvertIpc } from './ipc/convert';
+import { importPlaylistsFromFolder } from './services/playlist-export';
 import { initDatabase } from './services/db';
 import { initSettings } from './services/settings-store';
 
 const isDev = !app.isPackaged;
 
-// Must be called BEFORE app.ready. Marks our media protocol as standard so
-// ranged requests work (required for large audio files to seek/scrub).
+// Must be called BEFORE app.ready. `corsEnabled` + a real host in the URL is
+// what stops Chromium's HTMLMediaElement from rejecting the source with
+// "Media load rejected by URL safety check" — without it, the `<audio>`
+// element treats the origin as opaque.
 protocol.registerSchemesAsPrivileged([
-  { scheme: 'mp-media', privileges: { standard: true, secure: true, stream: true, bypassCSP: true, supportFetchAPI: true } },
+  {
+    scheme: 'mp-media',
+    privileges: {
+      standard: true,
+      secure: true,
+      stream: true,
+      bypassCSP: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+    },
+  },
 ]);
 
 let mainWindow: BrowserWindow | null = null;
@@ -48,18 +63,39 @@ function createWindow() {
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
+
+  // Forward renderer-side console messages to our main-process stdout so they
+  // show up in `npm run electron:dev` output. Renderer logs that live only in
+  // DevTools are invisible when debugging from the terminal.
+  mainWindow.webContents.on('console-message', (_e, level, msg, line, src) => {
+    const tag = ['DEBUG', 'INFO', 'WARN', 'ERROR'][level] ?? 'LOG';
+    process.stdout.write(`[renderer ${tag}] ${msg}  (${src}:${line})\n`);
+  });
 }
 
-// Register a custom protocol so we can serve music files + cover art to the renderer
-// without exposing raw filesystem paths to the web context.
+// Register a custom protocol so we can serve music files + cover art to the
+// renderer without exposing raw filesystem paths to the web context.
+//
+// We use Electron's `net.fetch` here (NOT Node's global fetch): Electron's
+// implementation has first-class support for file:// URLs, including HTTP
+// Range requests — required for <audio> scrubbing/seeking on large files.
 function registerMediaProtocol() {
   protocol.handle('mp-media', async (req) => {
-    const url = new URL(req.url);
-    const filePath = decodeURIComponent(url.pathname.replace(/^\/+/, ''));
     try {
-      const fileUrl = pathToFileURL(filePath);
-      return fetch(fileUrl.toString());
-    } catch (err) {
+      const url = new URL(req.url);
+      // Pathname is like `/M:/music/Artist/Album/Track.mp3` — leading slash stripped
+      // gives us the native Windows path. URL parser already decoded %-escapes per
+      // segment, so a single decodeURIComponent pass would double-decode any real
+      // `%` characters in filenames; decode per segment instead.
+      const segments = url.pathname.replace(/^\/+/, '').split('/').map(decodeURIComponent);
+      const filePath = segments.join(path.sep);
+      const fileUrl = pathToFileURL(filePath).toString();
+      process.stdout.write(`[mp-media] req=${req.url}\n            file=${filePath}\n            range=${req.headers.get('range') ?? 'none'}\n`);
+      const resp = await net.fetch(fileUrl);
+      process.stdout.write(`[mp-media] → status=${resp.status} type=${resp.headers.get('content-type')}\n`);
+      return resp;
+    } catch (err: any) {
+      console.error('[mp-media] error', err?.message ?? err);
       return new Response('Not found', { status: 404 });
     }
   });
@@ -74,9 +110,12 @@ app.whenReady().then(async () => {
   registerSettingsIpc(ipcMain);
   registerLibraryIpc(ipcMain, () => mainWindow);
   registerScanIpc(ipcMain, () => mainWindow);
+  setProgressWindow(() => mainWindow);
   registerVisualizerIpc(ipcMain);
   registerMetadataIpc(ipcMain);
   registerPlaylistsIpc(ipcMain);
+  registerStatsIpc(ipcMain);
+  registerConvertIpc(ipcMain, () => mainWindow);
 
   // Simple directory picker wired directly here so the renderer doesn't need dialog access.
   ipcMain.handle('library:pick-dir', async () => {
@@ -90,6 +129,17 @@ app.whenReady().then(async () => {
   });
 
   createWindow();
+
+  // Resume any art fetch that was interrupted by a previous session's exit.
+  // Waits for the window to show its first paint so the status strip is ready
+  // to receive events — otherwise the renderer might miss the initial emit.
+  mainWindow?.webContents.once('did-finish-load', () => {
+    setTimeout(() => { void resumeArtFetchOnStartup(); }, 1500);
+    // Also one-time import any .m3u8 files already on disk (from other apps,
+    // or leftover from a prior install). Non-destructive: only creates
+    // playlists whose name isn't already in the DB.
+    setTimeout(() => { void importPlaylistsFromFolder().catch(() => {}); }, 2000);
+  });
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

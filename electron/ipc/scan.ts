@@ -5,18 +5,42 @@ import { IPC, type ScanProgress } from '../../shared/types';
 import { getDb } from '../services/db';
 import { getSettings } from '../services/settings-store';
 import { fetchAlbumArt, persistAlbumArt } from '../services/metadata-providers';
+import { saveAlbumArt } from '../services/cover-art';
 
-// music-metadata v10+ is ESM-only. Our main process is CommonJS, so we can't
-// statically `import` it — Node would throw ERR_REQUIRE_ESM. Lazily load via
-// dynamic import(), which CJS can do without issue.
+// Set by main.ts once the window exists. Lets services outside the IPC
+// registration closure (e.g. the startup resume) post scan:progress events.
+let windowGetter: () => BrowserWindow | null = () => null;
+export function setProgressWindow(getter: () => BrowserWindow | null) {
+  windowGetter = getter;
+}
+function emit(payload: ScanProgress) {
+  windowGetter()?.webContents.send(IPC.SCAN_PROGRESS, payload);
+}
+
+// music-metadata v10+ is ESM-only. Our main process is CommonJS. For CJS
+// consumers the library exposes a `loadMusicMetadata()` factory — call it
+// once, keep the resolved module, use its `parseFile`.
 type ParseFile = typeof import('music-metadata').parseFile;
 let _parseFile: ParseFile | null = null;
 async function getParseFile(): Promise<ParseFile> {
   if (!_parseFile) {
-    const mod = await import('music-metadata');
-    _parseFile = mod.parseFile;
+    const mod: any = await import('music-metadata');
+    // v10+: `loadMusicMetadata` is the CJS-friendly entry point.
+    // Older v8/v9: `parseFile` is a direct named export.
+    const load = mod.loadMusicMetadata ?? mod.default?.loadMusicMetadata;
+    let fn: any;
+    if (typeof load === 'function') {
+      const mm = await load();
+      fn = mm.parseFile;
+    } else {
+      fn = mod.parseFile ?? mod.default?.parseFile;
+    }
+    if (typeof fn !== 'function') {
+      throw new Error(`music-metadata did not expose parseFile. Got keys: ${Object.keys(mod).join(', ')}`);
+    }
+    _parseFile = fn;
   }
-  return _parseFile;
+  return _parseFile!;
 }
 
 let cancelled = false;
@@ -90,14 +114,12 @@ function upsertAlbum(title: string | undefined | null, artistId: number | null, 
   return info.lastInsertRowid as number;
 }
 
-async function saveCoverArt(albumId: number, picture: { data: Uint8Array; format?: string } | undefined) {
+async function saveEmbeddedCoverArt(
+  albumId: number,
+  picture: { data: Uint8Array; format?: string } | undefined,
+) {
   if (!picture) return null;
-  const settings = getSettings();
-  const ext = (picture.format ?? 'image/jpeg').split('/')[1]?.replace(/[^a-z0-9]/gi, '') || 'jpg';
-  const file = path.join(settings.library.coverArtCachePath, `album_${albumId}.${ext}`);
-  await fs.writeFile(file, Buffer.from(picture.data));
-  getDb().prepare('UPDATE albums SET cover_art_path = ? WHERE id = ?').run(file, albumId);
-  return file;
+  return saveAlbumArt(albumId, picture.data, picture.format ?? 'image/jpeg');
 }
 
 export function registerScanIpc(ipcMain: IpcMain, getWin: () => BrowserWindow | null) {
@@ -127,6 +149,13 @@ export function registerScanIpc(ipcMain: IpcMain, getWin: () => BrowserWindow | 
       const settings = getSettings();
       const exts = new Set(settings.scan.extensions.map((e) => e.toLowerCase()));
       const dirs = getDb().prepare('SELECT id, path FROM directories WHERE enabled = 1').all() as Array<{ id: number; path: string }>;
+
+      // A user-initiated rescan should give previously-failed album art
+      // another shot against the online providers. (Startup resume keeps the
+      // flag so we don't hammer MB every launch for genuinely obscure releases.)
+      if (settings.scan.fetchCoverArt && settings.scan.providers.length > 0) {
+        getDb().prepare('UPDATE albums SET art_lookup_failed = 0 WHERE cover_art_path IS NULL').run();
+      }
 
       send({ phase: 'enumerating', filesSeen: 0, filesProcessed: 0, bytesSeen: 0, bytesProcessed: 0, currentFile: null, message: 'Scanning folders…' });
 
@@ -266,13 +295,15 @@ export function registerScanIpc(ipcMain: IpcMain, getWin: () => BrowserWindow | 
           if (albumId && settings.scan.fetchCoverArt) {
             const row = db.prepare('SELECT cover_art_path FROM albums WHERE id = ?').get(albumId) as { cover_art_path: string | null } | undefined;
             if (!row?.cover_art_path && md.common.picture && md.common.picture[0]) {
-              await saveCoverArt(albumId, md.common.picture[0]);
+              await saveEmbeddedCoverArt(albumId, md.common.picture[0]);
               // We got art from the file itself — clear any prior "failed lookup" flag.
               db.prepare('UPDATE albums SET art_lookup_failed = 0 WHERE id = ?').run(albumId);
             }
           }
-        } catch (err) {
-          // continue
+        } catch (err: any) {
+          // Log so bad files don't fail silently. If *every* file errors here,
+          // the DB will end up empty even though the UI says "done".
+          console.error(`[scan] failed to process ${f}:`, err?.code ?? '', err?.message ?? err);
         }
         processed++;
         // Bump bytesProcessed with this file's size (stat is fresh above).
@@ -291,8 +322,7 @@ export function registerScanIpc(ipcMain: IpcMain, getWin: () => BrowserWindow | 
       // posting progress via the `art` sub-state and completion events.
       const touchedIds = [...albumsTouchedThisRun];
       if (settings.scan.fetchCoverArt && settings.scan.providers.length > 0 && !cancelled) {
-        // Fire and forget. `runArtFetch` handles its own error reporting.
-        void runArtFetch(touchedIds, send);
+        void runArtFetch(touchedIds);
       }
 
       send({
@@ -313,94 +343,129 @@ export function registerScanIpc(ipcMain: IpcMain, getWin: () => BrowserWindow | 
     }
   });
 
-  /**
-   * Background album art fetcher. Runs concurrently with whatever the user is
-   * doing in the UI. Emits progress via the `art` sub-state of scan:progress.
-   *
-   * Safe to call while another art fetch is running — we de-dupe via `artInProgress`.
-   */
-  async function runArtFetch(touchedIds: number[], sendFn: typeof send) {
-    if (artInProgress) return;
-    artInProgress = true;
-    artCancelled = false;
-    const db = getDb();
-    const settings = getSettings();
+}
 
-    try {
-      const touchedPlaceholders = touchedIds.length ? touchedIds.map(() => '?').join(',') : 'NULL';
-      const sql = `
-        SELECT al.id, al.title, ar.name AS artist
-        FROM albums al LEFT JOIN artists ar ON ar.id = al.artist_id
-        WHERE al.cover_art_path IS NULL
-          AND (
-            al.art_lookup_failed = 0
-            OR al.art_lookup_failed IS NULL
-            OR al.id IN (${touchedPlaceholders})
-          )
-      `;
-      const missing = (touchedIds.length
-        ? db.prepare(sql).all(...touchedIds)
-        : db.prepare(sql).all()) as Array<{ id: number; title: string; artist: string | null }>;
+/**
+ * Background album art fetcher. Runs concurrently with whatever the user is
+ * doing in the UI. Emits progress via the `art` sub-state of scan:progress.
+ *
+ * Safe to call while another art fetch is running — de-duped via `artInProgress`.
+ * `touchedIds` is a list of album IDs that got new/changed tracks this run,
+ * meaning we should retry them even if a previous lookup failed. Pass `[]`
+ * to pick up any album that hasn't been tried yet (used on startup resume).
+ */
+export async function runArtFetch(touchedIds: number[]): Promise<void> {
+  if (artInProgress) return;
+  artInProgress = true;
+  artCancelled = false;
+  const db = getDb();
+  const settings = getSettings();
 
-      if (missing.length === 0) {
-        artInProgress = false;
-        return;
-      }
+  try {
+    const touchedPlaceholders = touchedIds.length ? touchedIds.map(() => '?').join(',') : 'NULL';
+    const sql = `
+      SELECT al.id, al.title, ar.name AS artist
+      FROM albums al LEFT JOIN artists ar ON ar.id = al.artist_id
+      WHERE al.cover_art_path IS NULL
+        AND (
+          al.art_lookup_failed = 0
+          OR al.art_lookup_failed IS NULL
+          OR al.id IN (${touchedPlaceholders})
+        )
+    `;
+    const missing = (touchedIds.length
+      ? db.prepare(sql).all(...touchedIds)
+      : db.prepare(sql).all()) as Array<{ id: number; title: string; artist: string | null }>;
 
-      artState = { albumsTotal: missing.length, albumsDone: 0, currentAlbum: null };
-      // Push an initial art-state update without touching the tag-scan fields.
-      sendFn({
-        phase: 'done',
-        filesSeen: 0, filesProcessed: 0, bytesSeen: 0, bytesProcessed: 0,
-        currentFile: null, message: null,
+    if (missing.length === 0) {
+      artInProgress = false;
+      return;
+    }
+
+    artState = { albumsTotal: missing.length, albumsDone: 0, currentAlbum: null };
+    emit({
+      phase: 'fetching-art',
+      filesSeen: missing.length, filesProcessed: 0,
+      bytesSeen: 0, bytesProcessed: 0,
+      currentFile: null, message: `Fetching cover art for ${missing.length} album(s)`,
+      art: { active: true, ...artState },
+    });
+
+    const markLookup = db.prepare('UPDATE albums SET art_lookup_at = ?, art_lookup_failed = ? WHERE id = ?');
+    for (const al of missing) {
+      if (artCancelled) break;
+      artState.currentAlbum = `${al.artist ?? '?'} — ${al.title}`;
+      emit({
+        phase: 'fetching-art',
+        filesSeen: missing.length, filesProcessed: artState.albumsDone,
+        bytesSeen: 0, bytesProcessed: 0,
+        currentFile: artState.currentAlbum, message: null,
         art: { active: true, ...artState },
       });
 
-      const markLookup = db.prepare('UPDATE albums SET art_lookup_at = ?, art_lookup_failed = ? WHERE id = ?');
-      for (const al of missing) {
-        if (artCancelled) break;
-        artState.currentAlbum = `${al.artist ?? '?'} — ${al.title}`;
-        sendFn({
+      let gotArt = false;
+      try {
+        const art = await fetchAlbumArt(al.artist, al.title, settings.scan.providers);
+        if (art) {
+          await persistAlbumArt(al.id, art);
+          gotArt = true;
+        }
+      } catch {
+        /* continue */
+      }
+      markLookup.run(Date.now(), gotArt ? 0 : 1, al.id);
+      artState.albumsDone++;
+      // Per-album update so Albums/Home views can re-render with the new cover.
+      if (gotArt) {
+        emit({
           phase: 'fetching-art',
           filesSeen: missing.length, filesProcessed: artState.albumsDone,
           bytesSeen: 0, bytesProcessed: 0,
-          currentFile: artState.currentAlbum, message: null,
+          currentFile: artState.currentAlbum, message: 'album-art-landed',
           art: { active: true, ...artState },
         });
-
-        let gotArt = false;
-        try {
-          const art = await fetchAlbumArt(al.artist, al.title, settings.scan.providers);
-          if (art) {
-            await persistAlbumArt(al.id, art);
-            gotArt = true;
-          }
-        } catch {
-          /* continue */
-        }
-        markLookup.run(Date.now(), gotArt ? 0 : 1, al.id);
-        artState.albumsDone++;
       }
-
-      // Final art-done signal.
-      sendFn({
-        phase: 'done',
-        filesSeen: missing.length, filesProcessed: artState.albumsDone,
-        bytesSeen: 0, bytesProcessed: 0,
-        currentFile: null,
-        message: `Cover art: ${artState.albumsDone} album${artState.albumsDone === 1 ? '' : 's'} processed`,
-        art: null,
-      });
-    } catch (err: any) {
-      sendFn({
-        phase: 'error',
-        filesSeen: 0, filesProcessed: 0, bytesSeen: 0, bytesProcessed: 0,
-        currentFile: null, message: `Art fetch failed: ${err?.message ?? err}`,
-        art: null,
-      });
-    } finally {
-      artInProgress = false;
-      artState = { albumsTotal: 0, albumsDone: 0, currentAlbum: null };
     }
+
+    emit({
+      phase: 'done',
+      filesSeen: missing.length, filesProcessed: artState.albumsDone,
+      bytesSeen: 0, bytesProcessed: 0,
+      currentFile: null,
+      message: `Cover art: ${artState.albumsDone} album${artState.albumsDone === 1 ? '' : 's'} processed`,
+      art: null,
+    });
+  } catch (err: any) {
+    emit({
+      phase: 'error',
+      filesSeen: 0, filesProcessed: 0, bytesSeen: 0, bytesProcessed: 0,
+      currentFile: null, message: `Art fetch failed: ${err?.message ?? err}`,
+      art: null,
+    });
+  } finally {
+    artInProgress = false;
+    artState = { albumsTotal: 0, albumsDone: 0, currentAlbum: null };
   }
+}
+
+/**
+ * Called once on app startup. If the previous session was killed mid art-fetch,
+ * any album with cover_art_path NULL and no `art_lookup_failed=1` flag is still
+ * pending. Resume quietly in the background so covers keep filling in.
+ */
+export async function resumeArtFetchOnStartup(): Promise<void> {
+  const settings = getSettings();
+  if (!settings.scan.fetchCoverArt || settings.scan.providers.length === 0) return;
+
+  const pending = (getDb()
+    .prepare(`
+      SELECT COUNT(*) AS c FROM albums
+      WHERE cover_art_path IS NULL
+        AND (art_lookup_failed IS NULL OR art_lookup_failed = 0)
+    `)
+    .get() as { c: number }).c;
+
+  if (pending === 0) return;
+  // Fire and forget. The background scan UI will reflect its progress.
+  void runArtFetch([]);
 }

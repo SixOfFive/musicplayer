@@ -37,6 +37,7 @@ export default function Sidebar() {
         <NavItem to="/library" label="Library" />
         <NavItem to="/albums" label="Albums" />
         <NavItem to="/artists" label="Artists" />
+        <NavItem to="/playlists" label="Playlists" />
         <NavItem to="/visualizer" label="Visualizer" />
       </nav>
 

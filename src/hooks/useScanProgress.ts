@@ -55,6 +55,20 @@ export function useScanProgress(): ScanProgress {
   const phaseStart = useRef<number | null>(null);
   const lastPhase = useRef<ScanPhase>('idle');
 
+  // 4Hz client-side tick so stats like Elapsed and Rate keep updating even when
+  // the backend is quiet (e.g. waiting on a slow HTTP response between albums).
+  useEffect(() => {
+    const t = setInterval(() => {
+      setP((prev) => {
+        if (prev.phase === 'idle' && !prev.art?.active) return prev;
+        const now = Date.now();
+        const phaseElapsedSec = phaseStart.current ? (now - phaseStart.current) / 1000 : prev.phaseElapsedSec;
+        return { ...prev, phaseElapsedSec };
+      });
+    }, 250);
+    return () => clearInterval(t);
+  }, []);
+
   useEffect(() => {
     const off = window.mp.scan.onProgress((raw: any) => {
       const now = Date.now();

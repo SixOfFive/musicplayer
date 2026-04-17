@@ -81,6 +81,29 @@ export async function initDatabase(): Promise<void> {
     );
 
     CREATE INDEX IF NOT EXISTS idx_pl_tracks_order ON playlist_tracks(playlist_id, position);
+
+    -- Per-track rollup: fast lookups for "most played", "last played", etc.
+    -- Denormalized copy of aggregates from play_events so we don't re-scan the
+    -- events table on every stats query. Updated on each record-play IPC.
+    CREATE TABLE IF NOT EXISTS track_plays_summary (
+      track_id INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
+      play_count INTEGER NOT NULL DEFAULT 0,
+      last_played_at INTEGER,
+      total_listened_sec REAL NOT NULL DEFAULT 0
+    );
+
+    -- Individual play events — needed for time-series (hours-per-day/week/month/year,
+    -- listening streaks, time-of-day histograms, session-length stats).
+    -- Recorded whenever a track finishes or is skipped with >= 5 sec heard.
+    CREATE TABLE IF NOT EXISTS play_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+      played_at INTEGER NOT NULL,
+      listened_sec REAL NOT NULL,
+      completed INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_play_events_time ON play_events(played_at);
+    CREATE INDEX IF NOT EXISTS idx_play_events_track ON play_events(track_id);
   `);
 
   // Lightweight migrations for existing databases (idempotent).

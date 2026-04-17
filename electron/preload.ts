@@ -18,7 +18,9 @@ const api = {
     deleteTrack: (id: number, deleteFile?: boolean) => ipcRenderer.invoke(IPC.LIBRARY_DELETE_TRACK, id, !!deleteFile),
     deleteAlbum: (id: number, deleteFiles?: boolean) => ipcRenderer.invoke(IPC.LIBRARY_DELETE_ALBUM, id, !!deleteFiles),
     defaultMusicDir: () => ipcRenderer.invoke(IPC.FIRST_RUN_DEFAULT_DIR),
+    stats: () => ipcRenderer.invoke(IPC.LIBRARY_STATS),
     artists: () => ipcRenderer.invoke(IPC.LIBRARY_ARTISTS),
+    artist: (id: number) => ipcRenderer.invoke(IPC.LIBRARY_ARTIST, id),
     album: (id: number) => ipcRenderer.invoke(IPC.LIBRARY_ALBUM, id),
     search: (q: string) => ipcRenderer.invoke(IPC.LIBRARY_SEARCH, q),
     fileUrl: (p: string) => ipcRenderer.invoke(IPC.PLAYBACK_FILE_URL, p),
@@ -51,10 +53,27 @@ const api = {
     addTracks: (id: number, trackIds: number[]) => ipcRenderer.invoke(IPC.PL_ADD_TRACKS, id, trackIds),
     removeTracks: (id: number, trackIds: number[]) => ipcRenderer.invoke(IPC.PL_REMOVE_TRACKS, id, trackIds),
     reorder: (id: number, ids: number[]) => ipcRenderer.invoke(IPC.PL_REORDER, id, ids),
+    exportAll: () => ipcRenderer.invoke(IPC.PL_EXPORT_ALL),
+    importFromFolder: () => ipcRenderer.invoke(IPC.PL_IMPORT_FROM_FOLDER),
   },
   likes: {
     toggle: (trackId: number) => ipcRenderer.invoke(IPC.LIKE_TOGGLE, trackId),
     list: () => ipcRenderer.invoke(IPC.LIKE_LIST),
+  },
+  stats: {
+    recordPlay: (trackId: number, listenedSec: number, completed: boolean) =>
+      ipcRenderer.invoke(IPC.STATS_RECORD_PLAY, trackId, listenedSec, completed),
+    overview: () => ipcRenderer.invoke(IPC.STATS_OVERVIEW),
+  },
+  convert: {
+    checkAvailable: () => ipcRenderer.invoke(IPC.CONVERT_CHECK_AVAILABLE),
+    albumToMp3: (albumId: number) => ipcRenderer.invoke(IPC.CONVERT_ALBUM_TO_MP3, albumId),
+    cancel: () => ipcRenderer.invoke(IPC.CONVERT_CANCEL),
+    onProgress: (cb: (p: unknown) => void) => {
+      const listener = (_: unknown, p: unknown) => cb(p);
+      ipcRenderer.on(IPC.CONVERT_PROGRESS, listener);
+      return () => ipcRenderer.removeListener(IPC.CONVERT_PROGRESS, listener);
+    },
   },
 };
 

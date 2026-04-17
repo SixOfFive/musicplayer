@@ -2,15 +2,18 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { AlbumSort, SortDir } from '../../shared/types';
 import { useLibraryRefresh } from '../hooks/useLibraryRefresh';
 import ScanProgressPanel from '../components/ScanProgressPanel';
+import AlbumCard from '../components/AlbumCard';
 
 export default function AlbumsView() {
   const [albums, setAlbums] = useState<any[]>([]);
   const [sortBy, setSortBy] = useState<AlbumSort>('title');
   const [sortDir, setSortDir] = useState<SortDir>('asc');
   const [genreFilter, setGenreFilter] = useState<string>('');
+  const [threshold, setThreshold] = useState<number | undefined>(undefined);
 
   const load = useCallback(() => {
     window.mp.library.albums({ limit: 1000, sortBy, sortDir, genre: genreFilter || undefined }).then(setAlbums);
+    window.mp.library.stats().then((s: any) => setThreshold(s?.albumSizeThresholdBytes)).catch(() => {});
   }, [sortBy, sortDir, genreFilter]);
 
   useEffect(() => { load(); }, [load]);
@@ -44,15 +47,7 @@ export default function AlbumsView() {
       </div>
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-4">
         {albums.map((a) => (
-          <div key={a.id} className="bg-bg-elev-1 hover:bg-bg-elev-2 p-3 rounded group relative">
-            {a.cover_art_path ? (
-              <img src={`mp-media:///${encodeURIComponent(a.cover_art_path)}`} className="aspect-square w-full rounded mb-2" alt="" />
-            ) : <div className="aspect-square w-full rounded mb-2 bg-bg-highlight" />}
-            <div className="text-sm truncate">{a.title}</div>
-            <div className="text-xs text-text-muted truncate">
-              {a.artist}{a.year ? ` · ${a.year}` : ''}{a.genre ? ` · ${a.genre}` : ''}
-            </div>
-          </div>
+          <AlbumCard key={a.id} album={a} sizeThreshold={threshold} />
         ))}
       </div>
     </section>

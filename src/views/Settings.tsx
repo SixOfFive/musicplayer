@@ -3,12 +3,14 @@ import LibrarySettings from './settings/LibrarySettings';
 import ScanSettings from './settings/ScanSettings';
 import VisualizerSettings from './settings/VisualizerSettings';
 import PlaybackSettings from './settings/PlaybackSettings';
+import ConversionSettings from './settings/ConversionSettings';
 
 const TABS = [
   { id: 'library', label: 'Library' },
   { id: 'scan', label: 'Scanning & Metadata' },
   { id: 'visualizer', label: 'Visualizer' },
   { id: 'playback', label: 'Playback' },
+  { id: 'conversion', label: 'Shrink albums' },
 ];
 
 export default function Settings() {
@@ -18,6 +20,7 @@ export default function Settings() {
     active === 'scan' ? ScanSettings :
     active === 'visualizer' ? VisualizerSettings :
     active === 'playback' ? PlaybackSettings :
+    active === 'conversion' ? ConversionSettings :
     LibrarySettings;
 
   return (

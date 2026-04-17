@@ -52,6 +52,18 @@ if [ ! -d node_modules ]; then
     npm run rebuild || warn "[WARN] rebuild failed — if the app errors loading better-sqlite3, run 'npm run rebuild' manually."
 fi
 
+# ---- Bundled ffmpeg probe ---------------------------------------------------
+# ffmpeg-static ships a platform binary at node_modules/ffmpeg-static/ffmpeg.
+# Used by the FLAC-to-MP3 "Shrink album" feature. If missing, the app still
+# runs; only that one feature is disabled.
+FFMPEG_BIN="node_modules/ffmpeg-static/ffmpeg"
+if [ -x "$FFMPEG_BIN" ]; then
+    say "[ok] Bundled ffmpeg present: $FFMPEG_BIN"
+else
+    warn "[WARN] ffmpeg-static binary not found. FLAC-to-MP3 conversion will be disabled."
+    warn "       Try: npm install ffmpeg-static"
+fi
+
 # ---- Launch -----------------------------------------------------------------
 
 say "================================================================"

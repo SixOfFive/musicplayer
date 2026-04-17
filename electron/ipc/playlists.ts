@@ -1,6 +1,7 @@
 import type { IpcMain } from 'electron';
 import { IPC, LIKED_PLAYLIST_ID } from '../../shared/types';
 import { getDb } from '../services/db';
+import { exportPlaylist, removeExportedPlaylist, exportAllPlaylists, importPlaylistsFromFolder } from '../services/playlist-export';
 
 export function registerPlaylistsIpc(ipcMain: IpcMain) {
   ipcMain.handle(IPC.PL_LIST, () => {
@@ -35,23 +36,31 @@ export function registerPlaylistsIpc(ipcMain: IpcMain) {
     ];
   });
 
-  ipcMain.handle(IPC.PL_CREATE, (_e, name: string, description: string | null = null) => {
+  ipcMain.handle(IPC.PL_CREATE, async (_e, name: string, description: string | null = null) => {
     const now = Date.now();
     const info = getDb()
       .prepare('INSERT INTO playlists (name, description, kind, created_at, updated_at) VALUES (?, ?, \'manual\', ?, ?)')
       .run(name, description, now, now);
-    return info.lastInsertRowid as number;
+    const id = info.lastInsertRowid as number;
+    await exportPlaylist(id);
+    return id;
   });
 
-  ipcMain.handle(IPC.PL_RENAME, (_e, id: number, name: string, description: string | null) => {
+  ipcMain.handle(IPC.PL_RENAME, async (_e, id: number, name: string, description: string | null) => {
+    const oldRow = getDb().prepare('SELECT name FROM playlists WHERE id = ?').get(id) as { name: string } | undefined;
     getDb()
       .prepare('UPDATE playlists SET name = ?, description = ?, updated_at = ? WHERE id = ?')
       .run(name, description, Date.now(), id);
+    // If the name changed, delete the old .m3u8 and write a fresh one under the new name.
+    if (oldRow && oldRow.name !== name) await removeExportedPlaylist(oldRow.name);
+    await exportPlaylist(id);
     return true;
   });
 
-  ipcMain.handle(IPC.PL_DELETE, (_e, id: number) => {
+  ipcMain.handle(IPC.PL_DELETE, async (_e, id: number) => {
+    const oldRow = getDb().prepare('SELECT name FROM playlists WHERE id = ?').get(id) as { name: string } | undefined;
     getDb().prepare('DELETE FROM playlists WHERE id = ?').run(id);
+    if (oldRow) await removeExportedPlaylist(oldRow.name);
     return true;
   });
 
@@ -87,15 +96,13 @@ export function registerPlaylistsIpc(ipcMain: IpcMain) {
     return { playlist, tracks };
   });
 
-  ipcMain.handle(IPC.PL_ADD_TRACKS, (_e, id: number, trackIds: number[]) => {
+  ipcMain.handle(IPC.PL_ADD_TRACKS, async (_e, id: number, trackIds: number[]) => {
     if (id === LIKED_PLAYLIST_ID) {
-      // Adding to "Liked Songs" just likes them.
       const stmt = getDb().prepare('INSERT OR IGNORE INTO track_likes (track_id, liked_at) VALUES (?, ?)');
       const now = Date.now();
-      const tx = getDb().transaction((ids: number[]) => {
-        for (const tid of ids) stmt.run(tid, now);
-      });
+      const tx = getDb().transaction((ids: number[]) => { for (const tid of ids) stmt.run(tid, now); });
       tx(trackIds);
+      await exportPlaylist(LIKED_PLAYLIST_ID);
       return true;
     }
     const maxRow = getDb()
@@ -109,14 +116,16 @@ export function registerPlaylistsIpc(ipcMain: IpcMain) {
       getDb().prepare('UPDATE playlists SET updated_at = ? WHERE id = ?').run(now, id);
     });
     tx(trackIds);
+    await exportPlaylist(id);
     return true;
   });
 
-  ipcMain.handle(IPC.PL_REMOVE_TRACKS, (_e, id: number, trackIds: number[]) => {
+  ipcMain.handle(IPC.PL_REMOVE_TRACKS, async (_e, id: number, trackIds: number[]) => {
     if (id === LIKED_PLAYLIST_ID) {
       const stmt = getDb().prepare('DELETE FROM track_likes WHERE track_id = ?');
       const tx = getDb().transaction((ids: number[]) => { for (const tid of ids) stmt.run(tid); });
       tx(trackIds);
+      await exportPlaylist(LIKED_PLAYLIST_ID);
       return true;
     }
     const stmt = getDb().prepare('DELETE FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?');
@@ -125,31 +134,40 @@ export function registerPlaylistsIpc(ipcMain: IpcMain) {
       getDb().prepare('UPDATE playlists SET updated_at = ? WHERE id = ?').run(Date.now(), id);
     });
     tx(trackIds);
+    await exportPlaylist(id);
     return true;
   });
 
-  ipcMain.handle(IPC.PL_REORDER, (_e, id: number, orderedTrackIds: number[]) => {
+  ipcMain.handle(IPC.PL_REORDER, async (_e, id: number, orderedTrackIds: number[]) => {
     const stmt = getDb().prepare('UPDATE playlist_tracks SET position = ? WHERE playlist_id = ? AND track_id = ?');
     const tx = getDb().transaction(() => {
       orderedTrackIds.forEach((tid, i) => stmt.run(i, id, tid));
       getDb().prepare('UPDATE playlists SET updated_at = ? WHERE id = ?').run(Date.now(), id);
     });
     tx();
+    await exportPlaylist(id);
     return true;
   });
 
-  ipcMain.handle(IPC.LIKE_TOGGLE, (_e, trackId: number) => {
+  ipcMain.handle(IPC.LIKE_TOGGLE, async (_e, trackId: number) => {
     const existing = getDb().prepare('SELECT 1 FROM track_likes WHERE track_id = ?').get(trackId);
+    let liked: boolean;
     if (existing) {
       getDb().prepare('DELETE FROM track_likes WHERE track_id = ?').run(trackId);
-      return false;
+      liked = false;
+    } else {
+      getDb().prepare('INSERT INTO track_likes (track_id, liked_at) VALUES (?, ?)').run(trackId, Date.now());
+      liked = true;
     }
-    getDb().prepare('INSERT INTO track_likes (track_id, liked_at) VALUES (?, ?)').run(trackId, Date.now());
-    return true;
+    await exportPlaylist(LIKED_PLAYLIST_ID);
+    return liked;
   });
 
   ipcMain.handle(IPC.LIKE_LIST, () => {
     return (getDb().prepare('SELECT track_id FROM track_likes').all() as Array<{ track_id: number }>)
       .map((r) => r.track_id);
   });
+
+  ipcMain.handle(IPC.PL_EXPORT_ALL, () => exportAllPlaylists());
+  ipcMain.handle(IPC.PL_IMPORT_FROM_FOLDER, () => importPlaylistsFromFolder());
 }

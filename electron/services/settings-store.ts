@@ -10,10 +10,24 @@ function defaults(): AppSettings {
   const userData = app.getPath('userData');
   return {
     firstRunComplete: false,
+    conversion: {
+      enabled: true,
+      quality: 'V0',
+      sizePercentileThreshold: 66,
+      moveOriginalsToTrash: true,
+    },
+    playlistExport: {
+      enabled: true,
+      folder: '',                 // empty → auto-resolve at write time
+      pathStyle: 'absolute',
+      exportLiked: true,
+    },
     library: {
       directories: [],
       databasePath: path.join(userData, 'library.db'),
       coverArtCachePath: path.join(userData, 'coverart'),
+      coverArtStorage: 'cache',
+      coverArtFilename: 'cover',
       allowFileDeletion: false,
     },
     scan: {

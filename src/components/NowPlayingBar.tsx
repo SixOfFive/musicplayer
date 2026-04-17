@@ -1,4 +1,5 @@
 import { usePlayer } from '../store/player';
+import { mediaUrl } from '../lib/mediaUrl';
 
 function fmt(sec: number) {
   if (!Number.isFinite(sec)) return '0:00';
@@ -15,7 +16,7 @@ export default function NowPlayingBar() {
     <footer className="h-20 bg-bg-elev-1 border-t border-white/5 grid grid-cols-3 items-center px-4">
       <div className="flex items-center gap-3 min-w-0">
         {cur?.coverArtPath ? (
-          <img src={`mp-media:///${encodeURIComponent(cur.coverArtPath)}`} className="w-14 h-14 rounded" alt="" />
+          <img src={mediaUrl(cur.coverArtPath)} className="w-14 h-14 rounded" alt="" />
         ) : (
           <div className="w-14 h-14 rounded bg-bg-highlight" />
         )}

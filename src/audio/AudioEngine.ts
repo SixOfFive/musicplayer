@@ -61,6 +61,12 @@ export class AudioEngine {
     this.element = new Audio();
     this.element.crossOrigin = 'anonymous';
     this.element.preload = 'metadata';
+    this.element.addEventListener('error', () => {
+      const e = this.element.error;
+      const codeName = ['', 'ABORTED', 'NETWORK', 'DECODE', 'SRC_NOT_SUPPORTED'][e?.code ?? 0] ?? 'UNKNOWN';
+      // Stringify inline — electron console-message forwarding flattens objects to "[object Object]".
+      console.error(`[AudioEngine] audio element error | src=${this.element.src} | code=${e?.code} (${codeName}) | msg=${e?.message ?? ''}`);
+    });
 
     // AudioContext created lazily on first play (browsers need a gesture).
     this.context = new (window.AudioContext || (window as any).webkitAudioContext)();
@@ -89,8 +95,13 @@ export class AudioEngine {
   }
 
   async play() {
-    if (this.context.state === 'suspended') await this.context.resume();
-    await this.element.play();
+    try {
+      if (this.context.state === 'suspended') await this.context.resume();
+      await this.element.play();
+    } catch (err: any) {
+      console.error(`[AudioEngine] play failed | src=${this.element.src} | ctxState=${this.context.state} | errName=${err?.name} | errMessage=${err?.message} | elementCode=${this.element.error?.code}`);
+      throw err;
+    }
     this.startLoop();
   }
 

@@ -79,7 +79,9 @@ export function registerLibraryIpc(ipcMain: IpcMain, _getWin: () => BrowserWindo
     return getDb()
       .prepare(`
         SELECT al.id, al.title, al.year, al.genre, al.cover_art_path, ar.name AS artist,
-               (SELECT COUNT(*) FROM tracks t WHERE t.album_id = al.id) AS track_count
+               (SELECT COUNT(*) FROM tracks t WHERE t.album_id = al.id) AS track_count,
+               (SELECT COALESCE(SUM(size), 0) FROM tracks t WHERE t.album_id = al.id) AS bytes,
+               (SELECT COUNT(*) FROM tracks t WHERE t.album_id = al.id AND LOWER(t.path) LIKE '%.flac') AS flac_count
         FROM albums al
         LEFT JOIN artists ar ON ar.id = al.artist_id
         ${where}
@@ -99,6 +101,41 @@ export function registerLibraryIpc(ipcMain: IpcMain, _getWin: () => BrowserWindo
         ORDER BY ar.name
       `)
       .all();
+  });
+
+  ipcMain.handle(IPC.LIBRARY_ARTIST, (_e, id: number) => {
+    const artist = getDb()
+      .prepare(`
+        SELECT ar.id, ar.name,
+               (SELECT COUNT(DISTINCT al.id) FROM albums al WHERE al.artist_id = ar.id) AS album_count,
+               (SELECT COUNT(*) FROM tracks t WHERE t.artist_id = ar.id) AS track_count,
+               (SELECT COALESCE(SUM(duration_sec), 0) FROM tracks t WHERE t.artist_id = ar.id) AS total_duration_sec
+        FROM artists ar WHERE ar.id = ?
+      `)
+      .get(id) as { id: number; name: string; album_count: number; track_count: number; total_duration_sec: number } | undefined;
+    if (!artist) return { artist: null, albums: [], tracks: [] };
+
+    const albums = getDb()
+      .prepare(`
+        SELECT al.id, al.title, al.year, al.genre, al.cover_art_path,
+               (SELECT COUNT(*) FROM tracks t WHERE t.album_id = al.id) AS track_count
+        FROM albums al WHERE al.artist_id = ?
+        ORDER BY al.year DESC NULLS LAST, al.title ASC
+      `)
+      .all(id) as Array<any>;
+
+    const tracks = getDb()
+      .prepare(`
+        SELECT t.*, ar.name AS artist, al.title AS album, al.cover_art_path AS cover_art_path
+        FROM tracks t
+        LEFT JOIN artists ar ON ar.id = t.artist_id
+        LEFT JOIN albums al ON al.id = t.album_id
+        WHERE t.artist_id = ?
+        ORDER BY al.year DESC NULLS LAST, al.title ASC, t.disc_no, t.track_no, t.title
+      `)
+      .all(id);
+
+    return { artist, albums, tracks };
   });
 
   ipcMain.handle(IPC.LIBRARY_ALBUM, (_e, id: number) => {
@@ -141,14 +178,107 @@ export function registerLibraryIpc(ipcMain: IpcMain, _getWin: () => BrowserWindo
   });
 
   ipcMain.handle(IPC.PLAYBACK_FILE_URL, (_e, p: string) => {
-    // Use our custom protocol so the renderer never sees raw file:// URLs.
-    return `mp-media:///${encodeURIComponent(p)}`;
+    // Encode the path segment-by-segment so each separator becomes a URL slash.
+    // (A single encodeURIComponent would escape the slashes, leaving the URL
+    // without a path hierarchy — technically fine for us, but a real-host URL
+    // plays nicer with Chromium's media element origin checks.)
+    const normalized = p.replace(/\\/g, '/');
+    const encoded = normalized.split('/').map(encodeURIComponent).join('/');
+    return `mp-media://local/${encoded}`;
   });
 
   // Default music directory following OS conventions (XDG 'MUSIC', macOS ~/Music,
   // Windows shell Music folder). Electron resolves these for us.
   ipcMain.handle(IPC.FIRST_RUN_DEFAULT_DIR, () => {
     try { return app.getPath('music'); } catch { return app.getPath('home'); }
+  });
+
+  // Library stats for the Home view. Single IPC, a few small aggregate queries.
+  ipcMain.handle(IPC.LIBRARY_STATS, () => {
+    const db = getDb();
+    const counts = db.prepare(`
+      SELECT
+        (SELECT COUNT(*) FROM tracks) AS track_count,
+        (SELECT COUNT(*) FROM albums) AS album_count,
+        (SELECT COUNT(*) FROM artists) AS artist_count,
+        (SELECT COUNT(*) FROM playlists) AS playlist_count,
+        (SELECT COUNT(*) FROM track_likes) AS liked_count,
+        (SELECT COALESCE(SUM(size), 0) FROM tracks) AS total_bytes,
+        (SELECT COALESCE(SUM(duration_sec), 0) FROM tracks) AS total_duration_sec,
+        (SELECT COUNT(*) FROM albums WHERE cover_art_path IS NOT NULL) AS albums_with_art,
+        (SELECT MIN(year) FROM tracks WHERE year IS NOT NULL AND year > 1500) AS oldest_year,
+        (SELECT MAX(year) FROM tracks WHERE year IS NOT NULL) AS newest_year
+    `).get() as any;
+
+    const topGenreRow = db.prepare(`
+      SELECT genre, COUNT(*) AS c
+      FROM tracks
+      WHERE genre IS NOT NULL AND genre <> ''
+      GROUP BY genre
+      ORDER BY c DESC
+      LIMIT 1
+    `).get() as { genre: string; c: number } | undefined;
+
+    const biggestAlbum = db.prepare(`
+      SELECT al.title AS title, ar.name AS artist, SUM(t.size) AS bytes
+      FROM tracks t
+      JOIN albums al ON al.id = t.album_id
+      LEFT JOIN artists ar ON ar.id = al.artist_id
+      GROUP BY al.id
+      ORDER BY bytes DESC
+      LIMIT 1
+    `).get() as { title: string; artist: string | null; bytes: number } | undefined;
+
+    const longestTrack = db.prepare(`
+      SELECT t.title AS title, ar.name AS artist, t.duration_sec AS seconds
+      FROM tracks t LEFT JOIN artists ar ON ar.id = t.artist_id
+      WHERE t.duration_sec IS NOT NULL
+      ORDER BY t.duration_sec DESC
+      LIMIT 1
+    `).get() as { title: string; artist: string | null; seconds: number } | undefined;
+
+    const recent = db.prepare(`
+      SELECT t.id, t.title, ar.name AS artist, al.title AS album, t.date_added AS dateAdded,
+             al.cover_art_path AS coverArtPath
+      FROM tracks t
+      LEFT JOIN artists ar ON ar.id = t.artist_id
+      LEFT JOIN albums al ON al.id = t.album_id
+      ORDER BY t.date_added DESC
+      LIMIT 8
+    `).all() as Array<{ id: number; title: string; artist: string | null; album: string | null; dateAdded: number; coverArtPath: string | null }>;
+
+    // Compute the album-size threshold for the "shrink this album" button.
+    // SQLite sorts NULLs first, so drop zero-byte albums before picking the percentile.
+    const pct = Math.max(0, Math.min(100, getSettings().conversion?.sizePercentileThreshold ?? 66));
+    const albumBytes = db.prepare(`
+      SELECT COALESCE(SUM(t.size), 0) AS b
+      FROM albums al
+      JOIN tracks t ON t.album_id = al.id
+      GROUP BY al.id HAVING b > 0
+      ORDER BY b ASC
+    `).all() as Array<{ b: number }>;
+    const albumSizeThresholdBytes = albumBytes.length > 0
+      ? albumBytes[Math.min(albumBytes.length - 1, Math.floor(albumBytes.length * pct / 100))].b
+      : Number.MAX_SAFE_INTEGER;
+
+    return {
+      trackCount: counts.track_count,
+      albumCount: counts.album_count,
+      artistCount: counts.artist_count,
+      playlistCount: counts.playlist_count,
+      likedCount: counts.liked_count,
+      totalBytes: counts.total_bytes,
+      totalDurationSec: counts.total_duration_sec,
+      coverArtCoverage: counts.album_count > 0 ? counts.albums_with_art / counts.album_count : 0,
+      oldestYear: counts.oldest_year ?? null,
+      newestYear: counts.newest_year ?? null,
+      topGenre: topGenreRow?.genre ?? null,
+      topGenreCount: topGenreRow?.c ?? 0,
+      biggestAlbum: biggestAlbum ?? null,
+      longestTrack: longestTrack ?? null,
+      mostRecentlyAdded: recent,
+      albumSizeThresholdBytes,
+    };
   });
 
   // Delete a track. Always removes it from the DB; optionally deletes the file.

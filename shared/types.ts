@@ -120,12 +120,64 @@ export interface VisualizerSettings {
   pluginSearchPaths: string[];
 }
 
+export type Mp3Quality = 'V0' | 'V2' | 'CBR320' | 'CBR256';
+
+export interface ConversionSettings {
+  enabled: boolean;
+  // MP3 quality preset. V0 ≈ 245 kbps VBR (archival); CBR320 is max constant bitrate.
+  quality: Mp3Quality;
+  // Show the "Shrink album" button on albums above this percentile of library
+  // album size. 66 = top third by bytes. 0 disables the size gate (always show).
+  sizePercentileThreshold: number;
+  // After converting, move originals to trash (default) or delete permanently.
+  // We never just unlink without shell.trashItem — this bool only picks which
+  // safe removal method to use.
+  moveOriginalsToTrash: boolean;
+}
+
+export interface ConvertProgress {
+  phase: 'idle' | 'starting' | 'converting' | 'verifying' | 'removing-originals' | 'done' | 'error';
+  albumId: number | null;
+  tracksTotal: number;
+  tracksDone: number;
+  currentFile: string | null;
+  bytesBefore: number;
+  bytesAfter: number;
+  message: string | null;
+}
+
+export type PlaylistPathStyle = 'absolute' | 'relative';
+
+export interface PlaylistExportSettings {
+  enabled: boolean;
+  // Absolute folder path where `.m3u8` files are written. Blank = auto-resolve
+  // to <first music dir>/Playlists/, falling back to userData/Playlists/.
+  folder: string;
+  // Absolute paths are most portable on this machine; relative paths make the
+  // playlist + music folder copyable to another host together.
+  pathStyle: PlaylistPathStyle;
+  // Also sync the Liked Songs virtual playlist as a real .m3u8 file.
+  exportLiked: boolean;
+}
+
 export interface AppSettings {
   firstRunComplete: boolean;
+  conversion: ConversionSettings;
+  playlistExport: PlaylistExportSettings;
   library: {
     directories: LibraryDirectory[];
     databasePath: string;
     coverArtCachePath: string;
+    // Where new cover art is written:
+    //   'cache'        → app userData dir (default; no writes to your music collection)
+    //   'album-folder' → alongside the audio files, as cover.jpg / cover.png
+    //                    Every mainstream music app (Jellyfin, Plex, MusicBee, foobar)
+    //                    also reads this file, so your art travels with the collection.
+    //                    Falls back to cache if the music folder isn't writable.
+    coverArtStorage: 'cache' | 'album-folder';
+    // Filename used when coverArtStorage is 'album-folder'. Common choices:
+    // "cover", "folder", "AlbumArt". Extension is appended automatically.
+    coverArtFilename: string;
     // Gate for destructive ops. When true, delete-from-disk menu items are enabled.
     allowFileDeletion: boolean;
   };
@@ -170,6 +222,7 @@ export const IPC = {
   LIBRARY_TRACKS: 'library:tracks',
   LIBRARY_ALBUMS: 'library:albums',
   LIBRARY_ARTISTS: 'library:artists',
+  LIBRARY_ARTIST: 'library:artist',
   LIBRARY_ALBUM: 'library:album',
   LIBRARY_SEARCH: 'library:search',
   // Playback helpers
@@ -198,7 +251,88 @@ export const IPC = {
   LIBRARY_DELETE_ALBUM: 'library:delete-album',
   // First-run
   FIRST_RUN_DEFAULT_DIR: 'first-run:default-dir',
+  // Home / library stats
+  LIBRARY_STATS: 'library:stats',
+  // Playback statistics
+  STATS_RECORD_PLAY: 'stats:record-play',
+  STATS_OVERVIEW: 'stats:overview',
+  // FLAC -> MP3 conversion
+  CONVERT_ALBUM_TO_MP3: 'convert:album-to-mp3',
+  CONVERT_CANCEL: 'convert:cancel',
+  CONVERT_PROGRESS: 'convert:progress',
+  CONVERT_CHECK_AVAILABLE: 'convert:check-available',
+  // Playlist export / import (universal M3U8)
+  PL_EXPORT_ALL: 'pl:export-all',
+  PL_IMPORT_FROM_FOLDER: 'pl:import-from-folder',
 } as const;
+
+export interface LibraryStats {
+  trackCount: number;
+  albumCount: number;
+  artistCount: number;
+  playlistCount: number;
+  likedCount: number;
+  totalBytes: number;
+  totalDurationSec: number;
+  coverArtCoverage: number;  // 0..1: fraction of albums with art
+  oldestYear: number | null;
+  newestYear: number | null;
+  topGenre: string | null;
+  topGenreCount: number;
+  biggestAlbum: { title: string; artist: string | null; bytes: number } | null;
+  longestTrack: { title: string; artist: string | null; seconds: number } | null;
+  mostRecentlyAdded: Array<{ id: number; title: string; artist: string | null; album: string | null; dateAdded: number; coverArtPath: string | null }>;
+  // Byte threshold for "oversized album" (derived from conversion.sizePercentileThreshold).
+  // Albums with bytes >= this value are shown the FLAC-to-MP3 conversion button.
+  albumSizeThresholdBytes: number;
+}
+
+export interface StatsOverview {
+  // Cumulative listening
+  totalListenedSec: number;
+  totalPlays: number;
+  uniqueTracksPlayed: number;
+  uniqueArtistsPlayed: number;
+  uniqueAlbumsPlayed: number;
+
+  // Time-bucketed
+  listenedTodaySec: number;
+  listenedThisWeekSec: number;
+  listenedThisMonthSec: number;
+  listenedThisYearSec: number;
+  listenedLast7DaysSec: number;
+  listenedLast30DaysSec: number;
+
+  // Averages
+  avgDailyListenedSec: number;      // across all days any plays exist
+  activeDayCount: number;            // distinct days with at least one play
+  currentStreakDays: number;         // consecutive days up to today with plays
+  longestStreakDays: number;
+
+  // Distributions
+  mostActiveHour: number | null;     // 0..23, UTC-offset corrected in renderer
+  mostActiveDayOfWeek: number | null;// 0 Sun .. 6 Sat
+  hourHistogram: number[];           // length 24, sums of listened_sec
+  dayOfWeekHistogram: number[];      // length 7
+
+  // Top lists
+  topTracks: Array<{ id: number; title: string; artist: string | null; album: string | null; playCount: number; coverArtPath: string | null }>;
+  topArtists: Array<{ id: number; name: string; playCount: number; listenedSec: number }>;
+  topAlbums: Array<{ id: number; title: string; artist: string | null; playCount: number; coverArtPath: string | null }>;
+  topGenres: Array<{ genre: string; playCount: number }>;
+
+  // Firsts / lasts
+  firstPlayAt: number | null;
+  lastPlayAt: number | null;
+  firstPlayedTrack: { id: number; title: string; artist: string | null } | null;
+  lastPlayedTrack: { id: number; title: string; artist: string | null } | null;
+
+  // Fun facts
+  longestSessionSec: number;         // longest contiguous burst (gaps > 10 min = new session)
+  sessionCount: number;
+  avgSessionSec: number;
+  mostPlayedDay: { date: string; sec: number } | null; // biggest single-day listening
+}
 
 export type TrackSort = 'title' | 'artist' | 'album' | 'year' | 'genre' | 'duration' | 'date_added' | 'track_no';
 export type SortDir = 'asc' | 'desc';
