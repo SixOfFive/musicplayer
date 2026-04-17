@@ -1,27 +1,50 @@
-import { useNavigate } from 'react-router-dom';
-import { useEffect, useState } from 'react';
+import { useLocation, useNavigate, useNavigationType } from 'react-router-dom';
+import { useEffect, useRef, useState } from 'react';
 
 export default function TopBar() {
   const nav = useNavigate();
+  const location = useLocation();
+  const navType = useNavigationType(); // 'PUSH' | 'POP' | 'REPLACE'
   const [q, setQ] = useState('');
   const [scanning, setScanning] = useState(false);
-  const [canGoBack, setCanGoBack] = useState(false);
-  const [canGoFwd, setCanGoFwd] = useState(false);
 
-  // History API doesn't expose canGoBack/canGoForward directly, so watch the
-  // popstate event and our own navigation signals to keep buttons enabled-state
-  // in sync. We estimate via history.length: if > 1, there's probably a back.
+  // The browser's native `history.length` and `popstate` can't tell us which
+  // side of the stack we're on — so we maintain our own history model that
+  // mirrors what the user has navigated through.
+  //
+  //   stack  : ordered list of location keys we've visited (push order)
+  //   cursor : index of the CURRENT entry within `stack`
+  //
+  //   → PUSH truncates everything after `cursor` and appends a new entry.
+  //   → POP  (back/forward) finds the entry's existing index and moves cursor.
+  //   → REPLACE overwrites the entry at `cursor`.
+  const stack = useRef<string[]>([]);
+  const cursor = useRef(-1);
+  const [, force] = useState(0);
+  const bump = () => force((n) => n + 1);
+
   useEffect(() => {
-    const update = () => {
-      setCanGoBack(window.history.length > 1);
-      // No reliable way to detect forward availability without custom tracking.
-      // Optimistic: assume forward only after the user has used back.
-      setCanGoFwd((prev) => prev);
-    };
-    update();
-    window.addEventListener('popstate', update);
-    return () => window.removeEventListener('popstate', update);
-  }, []);
+    const key = location.key;
+    if (cursor.current < 0) {
+      // Very first render.
+      stack.current = [key];
+      cursor.current = 0;
+    } else if (navType === 'PUSH') {
+      stack.current = stack.current.slice(0, cursor.current + 1);
+      stack.current.push(key);
+      cursor.current = stack.current.length - 1;
+    } else if (navType === 'POP') {
+      const idx = stack.current.indexOf(key);
+      if (idx >= 0) cursor.current = idx;
+      else { stack.current.push(key); cursor.current = stack.current.length - 1; }
+    } else if (navType === 'REPLACE') {
+      stack.current[cursor.current] = key;
+    }
+    bump();
+  }, [location.key, navType]);
+
+  const canGoBack = cursor.current > 0;
+  const canGoFwd = cursor.current < stack.current.length - 1;
 
   useEffect(() => {
     const off = window.mp.scan.onProgress((p: any) => {
@@ -39,7 +62,7 @@ export default function TopBar() {
     <div className="titlebar-drag h-14 flex items-center gap-3 px-6 border-b border-white/5">
       <div className="titlebar-nodrag flex items-center gap-2">
         <button
-          onClick={() => { nav(-1); setCanGoFwd(true); }}
+          onClick={() => nav(-1)}
           disabled={!canGoBack}
           className="w-9 h-9 rounded-full bg-black/50 hover:bg-black/70 disabled:opacity-30 disabled:hover:bg-black/50 text-white flex items-center justify-center text-xl leading-none transition"
           title="Back"
