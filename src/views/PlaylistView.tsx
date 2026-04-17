@@ -6,6 +6,7 @@ import type { TrackSort, SortDir } from '../../shared/types';
 import { LIKED_PLAYLIST_ID } from '../../shared/types';
 import { useLibraryRefresh } from '../hooks/useLibraryRefresh';
 import ScanProgressPanel from '../components/ScanProgressPanel';
+import MiniVisualizer from '../components/MiniVisualizer';
 
 function sortTracks(tracks: RowTrack[], by: TrackSort, dir: SortDir) {
   const mul = dir === 'asc' ? 1 : -1;
@@ -52,11 +53,14 @@ export default function PlaylistView() {
 
   return (
     <section>
-      <header className={`px-8 pt-8 pb-6 ${pid === LIKED_PLAYLIST_ID ? 'bg-gradient-to-b from-purple-900/60 to-transparent' : 'bg-gradient-to-b from-bg-elev-2 to-transparent'}`}>
-        <div className="text-xs uppercase tracking-wide text-text-muted">Playlist</div>
-        <h1 className="text-5xl font-extrabold my-2">{meta?.name ?? '...'}</h1>
-        {meta?.description && <p className="text-sm text-text-muted">{meta.description}</p>}
-        <p className="text-sm text-text-muted mt-2">{tracks.length} tracks</p>
+      <header className={`px-8 pt-8 pb-6 flex items-start gap-6 ${pid === LIKED_PLAYLIST_ID ? 'bg-gradient-to-b from-purple-900/60 to-transparent' : 'bg-gradient-to-b from-bg-elev-2 to-transparent'}`}>
+        <div className="flex-1 min-w-0">
+          <div className="text-xs uppercase tracking-wide text-text-muted">Playlist</div>
+          <h1 className="text-5xl font-extrabold my-2 truncate">{meta?.name ?? '...'}</h1>
+          {meta?.description && <p className="text-sm text-text-muted">{meta.description}</p>}
+          <p className="text-sm text-text-muted mt-2">{tracks.length} tracks</p>
+        </div>
+        <MiniVisualizer className="hidden md:block w-64 h-36 flex-shrink-0 self-end" />
       </header>
       <div className="px-8 pb-10">
         <ScanProgressPanel />
