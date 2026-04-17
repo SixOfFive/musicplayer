@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
+import { useScrollRestoration } from './hooks/useScrollRestoration';
 import Sidebar from './components/Sidebar';
 import TopBar from './components/TopBar';
 import NowPlayingBar from './components/NowPlayingBar';
@@ -23,6 +24,8 @@ export default function App() {
   const refreshPlaylists = useLibrary((s) => s.refreshPlaylists);
   const setLikedIds = usePlayer((s) => s.setLikedIds);
   const [showFirstRun, setShowFirstRun] = useState(false);
+  const mainRef = useRef<HTMLDivElement | null>(null);
+  useScrollRestoration(mainRef);
 
   useEffect(() => {
     refreshPlaylists();
@@ -39,7 +42,7 @@ export default function App() {
         <Sidebar />
         <div className="flex flex-col min-h-0 bg-bg-base rounded-tl-lg">
           <TopBar />
-          <div className="flex-1 min-h-0 overflow-y-auto">
+          <div ref={mainRef} className="flex-1 min-h-0 overflow-y-auto">
             <Routes>
               <Route path="/" element={<Home />} />
               <Route path="/library" element={<LibraryView />} />

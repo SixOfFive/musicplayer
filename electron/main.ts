@@ -12,7 +12,7 @@ import { registerConvertIpc } from './ipc/convert';
 import { registerUpdateIpc } from './ipc/update';
 import { importPlaylistsFromFolder } from './services/playlist-export';
 import { initDatabase } from './services/db';
-import { initSettings } from './services/settings-store';
+import { initSettings, getSettings } from './services/settings-store';
 
 const isDev = !app.isPackaged;
 
@@ -55,20 +55,30 @@ function createWindow() {
 
   if (isDev) {
     mainWindow.loadURL('http://localhost:5173');
-    mainWindow.webContents.openDevTools({ mode: 'detach' });
   } else {
     // __dirname at runtime is dist-electron/electron — the Vite bundle lives at ../../dist.
     mainWindow.loadFile(path.join(__dirname, '..', '..', 'dist', 'index.html'));
   }
 
+  // Respect the debug.openDevToolsOnStartup setting. Default off.
+  try {
+    const dbg = getSettings().debug;
+    if (dbg?.openDevToolsOnStartup) {
+      mainWindow.webContents.openDevTools({ mode: 'detach' });
+    }
+  } catch { /* settings not initialised yet — ignore */ }
+
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
 
-  // Forward renderer-side console messages to our main-process stdout so they
-  // show up in `npm run electron:dev` output. Renderer logs that live only in
-  // DevTools are invisible when debugging from the terminal.
+  // Forward renderer-side console messages to our main-process stdout so
+  // they're visible in the terminal. Gated on the debug.logRendererToMain
+  // setting so normal users aren't spammed.
   mainWindow.webContents.on('console-message', (_e, level, msg, line, src) => {
+    try {
+      if (!getSettings().debug?.logRendererToMain) return;
+    } catch { return; }
     const tag = ['DEBUG', 'INFO', 'WARN', 'ERROR'][level] ?? 'LOG';
     process.stdout.write(`[renderer ${tag}] ${msg}  (${src}:${line})\n`);
   });
@@ -121,6 +131,17 @@ app.whenReady().then(async () => {
   registerStatsIpc(ipcMain);
   registerConvertIpc(ipcMain, () => mainWindow);
   registerUpdateIpc(ipcMain);
+
+  // Debug: toggle DevTools on demand (used by Settings → About & Updates).
+  ipcMain.handle('debug:toggle-devtools', () => {
+    if (!mainWindow) return false;
+    if (mainWindow.webContents.isDevToolsOpened()) {
+      mainWindow.webContents.closeDevTools();
+      return false;
+    }
+    mainWindow.webContents.openDevTools({ mode: 'detach' });
+    return true;
+  });
 
   // Simple directory picker wired directly here so the renderer doesn't need dialog access.
   ipcMain.handle('library:pick-dir', async () => {

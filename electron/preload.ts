@@ -70,6 +70,9 @@ const api = {
     check: () => ipcRenderer.invoke(IPC.UPDATE_CHECK),
     apply: () => ipcRenderer.invoke(IPC.UPDATE_APPLY),
   },
+  debug: {
+    toggleDevTools: () => ipcRenderer.invoke(IPC.DEBUG_TOGGLE_DEVTOOLS),
+  },
   convert: {
     checkAvailable: () => ipcRenderer.invoke(IPC.CONVERT_CHECK_AVAILABLE),
     albumToMp3: (albumId: number) => ipcRenderer.invoke(IPC.CONVERT_ALBUM_TO_MP3, albumId),

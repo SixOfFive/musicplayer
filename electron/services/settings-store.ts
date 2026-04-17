@@ -28,6 +28,10 @@ function defaults(): AppSettings {
       repoSlug: 'SixOfFive/musicplayer',
       branch: 'main',
     },
+    debug: {
+      openDevToolsOnStartup: false,
+      logRendererToMain: false,
+    },
     library: {
       directories: [],
       databasePath: path.join(userData, 'library.db'),

@@ -160,6 +160,50 @@ export default function AboutSettings() {
           </p>
         </div>
       </div>
+
+      <div>
+        <h2 className="text-lg font-semibold mb-1">Debug</h2>
+        <div className="bg-bg-elev-2 rounded p-4 space-y-3 text-sm">
+          <label className="flex items-start gap-2">
+            <input
+              type="checkbox" className="mt-1"
+              checked={!!settings.debug?.openDevToolsOnStartup}
+              onChange={async (e) => {
+                const next = await window.mp.settings.set({ debug: { openDevToolsOnStartup: e.target.checked } } as any);
+                setSettings(next as AppSettings);
+              }}
+            />
+            <span>
+              <span className="font-medium">Open DevTools on startup</span>
+              <p className="text-xs text-text-muted mt-0.5">Off by default. When on, the Chromium inspector pops out as a separate window every launch.</p>
+            </span>
+          </label>
+
+          <label className="flex items-start gap-2">
+            <input
+              type="checkbox" className="mt-1"
+              checked={!!settings.debug?.logRendererToMain}
+              onChange={async (e) => {
+                const next = await window.mp.settings.set({ debug: { logRendererToMain: e.target.checked } } as any);
+                setSettings(next as AppSettings);
+              }}
+            />
+            <span>
+              <span className="font-medium">Mirror renderer console to terminal</span>
+              <p className="text-xs text-text-muted mt-0.5">Forwards every <code className="font-mono">console.log</code> / <code className="font-mono">console.error</code> from the UI into the <code className="font-mono">npm run electron:dev</code> output. Noisy — only useful when diagnosing.</p>
+            </span>
+          </label>
+
+          <div className="pt-2 border-t border-white/5">
+            <button
+              onClick={() => window.mp.debug.toggleDevTools()}
+              className="bg-white/10 hover:bg-white/20 px-4 py-1.5 rounded-full text-sm"
+              title="Open or close DevTools right now without changing the startup setting"
+            >Toggle DevTools now</button>
+            <span className="ml-3 text-xs text-text-muted">Keyboard: <code className="font-mono">F12</code> works in dev builds as well.</span>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

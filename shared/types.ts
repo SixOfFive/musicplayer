@@ -165,6 +165,7 @@ export interface AppSettings {
   conversion: ConversionSettings;
   playlistExport: PlaylistExportSettings;
   update: UpdateSettings;
+  debug: DebugSettings;
   library: {
     directories: LibraryDirectory[];
     databasePath: string;
@@ -269,6 +270,8 @@ export const IPC = {
   UPDATE_INFO: 'update:info',
   UPDATE_CHECK: 'update:check',
   UPDATE_APPLY: 'update:apply',
+  // Debug
+  DEBUG_TOGGLE_DEVTOOLS: 'debug:toggle-devtools',
 } as const;
 
 export interface UpdateCheckResult {
@@ -289,6 +292,13 @@ export interface UpdateSettings {
   checkOnStartup: boolean;
   repoSlug: string;         // "SixOfFive/musicplayer"
   branch: string;           // "main"
+}
+
+export interface DebugSettings {
+  // When true, open Chromium DevTools automatically at startup.
+  openDevToolsOnStartup: boolean;
+  // Forward renderer console.log to main stdout (useful in dev terminals).
+  logRendererToMain: boolean;
 }
 
 export interface LibraryStats {

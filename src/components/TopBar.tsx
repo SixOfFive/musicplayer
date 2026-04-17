@@ -5,6 +5,23 @@ export default function TopBar() {
   const nav = useNavigate();
   const [q, setQ] = useState('');
   const [scanning, setScanning] = useState(false);
+  const [canGoBack, setCanGoBack] = useState(false);
+  const [canGoFwd, setCanGoFwd] = useState(false);
+
+  // History API doesn't expose canGoBack/canGoForward directly, so watch the
+  // popstate event and our own navigation signals to keep buttons enabled-state
+  // in sync. We estimate via history.length: if > 1, there's probably a back.
+  useEffect(() => {
+    const update = () => {
+      setCanGoBack(window.history.length > 1);
+      // No reliable way to detect forward availability without custom tracking.
+      // Optimistic: assume forward only after the user has used back.
+      setCanGoFwd((prev) => prev);
+    };
+    update();
+    window.addEventListener('popstate', update);
+    return () => window.removeEventListener('popstate', update);
+  }, []);
 
   useEffect(() => {
     const off = window.mp.scan.onProgress((p: any) => {
@@ -21,8 +38,20 @@ export default function TopBar() {
   return (
     <div className="titlebar-drag h-14 flex items-center gap-3 px-6 border-b border-white/5">
       <div className="titlebar-nodrag flex items-center gap-2">
-        <button onClick={() => history.back()} className="w-8 h-8 rounded-full bg-black/40 text-text-secondary hover:text-white">‹</button>
-        <button onClick={() => history.forward()} className="w-8 h-8 rounded-full bg-black/40 text-text-secondary hover:text-white">›</button>
+        <button
+          onClick={() => { nav(-1); setCanGoFwd(true); }}
+          disabled={!canGoBack}
+          className="w-9 h-9 rounded-full bg-black/50 hover:bg-black/70 disabled:opacity-30 disabled:hover:bg-black/50 text-white flex items-center justify-center text-xl leading-none transition"
+          title="Back"
+          aria-label="Back"
+        >‹</button>
+        <button
+          onClick={() => nav(1)}
+          disabled={!canGoFwd}
+          className="w-9 h-9 rounded-full bg-black/50 hover:bg-black/70 disabled:opacity-30 disabled:hover:bg-black/50 text-white flex items-center justify-center text-xl leading-none transition"
+          title="Forward"
+          aria-label="Forward"
+        >›</button>
       </div>
       <div className="titlebar-nodrag flex-1 max-w-md">
         <input
