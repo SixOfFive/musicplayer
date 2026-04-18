@@ -165,24 +165,97 @@ export function registerLibraryIpc(ipcMain: IpcMain, _getWin: () => BrowserWindo
     return { album, tracks };
   });
 
+  /**
+   * Library-wide search. Tokenized: whitespace-separated terms are ANDed
+   * together, each matched case-insensitively against any of title / artist /
+   * album (for tracks & albums) or name (for artists). So "beatles help"
+   * returns tracks where both "beatles" and "help" appear somewhere in the
+   * track's title/artist/album — regardless of which field.
+   *
+   * Returns rich hit shapes (cover art, durations, counts, album sizes) so
+   * the search view can render useful rows without extra round-trips.
+   */
   ipcMain.handle(IPC.LIBRARY_SEARCH, (_e, q: string) => {
-    const like = `%${q}%`;
-    return {
-      tracks: getDb()
-        .prepare(`
-          SELECT t.id, t.title, ar.name AS artist, al.title AS album
-          FROM tracks t LEFT JOIN artists ar ON ar.id = t.artist_id
-          LEFT JOIN albums al ON al.id = t.album_id
-          WHERE t.title LIKE ? LIMIT 50
-        `)
-        .all(like),
-      albums: getDb()
-        .prepare(`SELECT id, title FROM albums WHERE title LIKE ? LIMIT 25`)
-        .all(like),
-      artists: getDb()
-        .prepare(`SELECT id, name FROM artists WHERE name LIKE ? LIMIT 25`)
-        .all(like),
-    };
+    const db = getDb();
+    const tokens = String(q ?? '').trim().split(/\s+/).filter(Boolean);
+    if (tokens.length === 0) {
+      return { tracks: [], albums: [], artists: [] };
+    }
+
+    // Build dynamic WHERE clauses — one AND-clause per token. Using LIKE
+    // on LOWER(concat) keeps the query case-insensitive without requiring a
+    // FTS index.
+    const trackHaystack = `LOWER(t.title || ' ' || COALESCE(ar.name, '') || ' ' || COALESCE(al.title, ''))`;
+    const albumHaystack = `LOWER(al.title || ' ' || COALESCE(ar.name, ''))`;
+    const artistHaystack = `LOWER(ar.name)`;
+
+    const tWhere = tokens.map(() => `${trackHaystack} LIKE ?`).join(' AND ');
+    const alWhere = tokens.map(() => `${albumHaystack} LIKE ?`).join(' AND ');
+    const arWhere = tokens.map(() => `${artistHaystack} LIKE ?`).join(' AND ');
+    const params = tokens.map((t) => `%${t.toLowerCase()}%`);
+
+    const tracks = db.prepare(`
+      SELECT t.id, t.title, t.path, t.duration_sec AS durationSec,
+             ar.name AS artist, ar.id AS artistId,
+             al.title AS album, al.id AS albumId, al.cover_art_path AS coverArtPath
+      FROM tracks t
+      LEFT JOIN artists ar ON ar.id = t.artist_id
+      LEFT JOIN albums al ON al.id = t.album_id
+      WHERE ${tWhere}
+      ORDER BY t.title
+      LIMIT 100
+    `).all(...params);
+
+    const albums = db.prepare(`
+      SELECT al.id, al.title, al.year, al.cover_art_path AS coverArtPath,
+             ar.name AS artist,
+             COUNT(t.id) AS trackCount,
+             COALESCE(SUM(t.size), 0) AS bytes
+      FROM albums al
+      LEFT JOIN artists ar ON ar.id = al.artist_id
+      LEFT JOIN tracks t ON t.album_id = al.id
+      WHERE ${alWhere}
+      GROUP BY al.id
+      ORDER BY al.title
+      LIMIT 50
+    `).all(...params);
+
+    const artists = db.prepare(`
+      SELECT ar.id, ar.name,
+             COUNT(DISTINCT t.id) AS trackCount,
+             COUNT(DISTINCT al.id) AS albumCount
+      FROM artists ar
+      LEFT JOIN tracks t ON t.artist_id = ar.id
+      LEFT JOIN albums al ON al.artist_id = ar.id
+      WHERE ${arWhere}
+      GROUP BY ar.id
+      ORDER BY ar.name
+      LIMIT 50
+    `).all(...params);
+
+    return { tracks, albums, artists };
+  });
+
+  /**
+   * Top-N albums by total on-disk size, descending. Used by the Search view's
+   * "largest albums" shortcut — gives the user a quick entry point to the
+   * biggest (usually hi-res / multi-disc) albums in their library.
+   */
+  ipcMain.handle(IPC.LIBRARY_LARGEST_ALBUMS, (_e, limit: number = 25) => {
+    const n = Math.max(1, Math.min(100, Math.floor(limit)));
+    return getDb().prepare(`
+      SELECT al.id, al.title, al.cover_art_path AS coverArtPath,
+             ar.name AS artist,
+             COUNT(t.id) AS trackCount,
+             COALESCE(SUM(t.size), 0) AS bytes
+      FROM albums al
+      LEFT JOIN artists ar ON ar.id = al.artist_id
+      LEFT JOIN tracks t ON t.album_id = al.id
+      GROUP BY al.id
+      HAVING bytes > 0
+      ORDER BY bytes DESC
+      LIMIT ?
+    `).all(n);
   });
 
   ipcMain.handle(IPC.PLAYBACK_FILE_URL, (_e, p: string) => {

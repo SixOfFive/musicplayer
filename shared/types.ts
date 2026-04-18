@@ -265,6 +265,7 @@ export const IPC = {
   LIBRARY_ARTIST: 'library:artist',
   LIBRARY_ALBUM: 'library:album',
   LIBRARY_SEARCH: 'library:search',
+  LIBRARY_LARGEST_ALBUMS: 'library:largest-albums',
   // Playback helpers
   PLAYBACK_FILE_URL: 'playback:file-url',
   // Visualizer plugins
@@ -506,3 +507,49 @@ export interface AlbumQuery {
 }
 
 export type IpcChannel = typeof IPC[keyof typeof IPC];
+
+/**
+ * Search hit shapes — richer than the original LIBRARY_SEARCH payload so the
+ * dedicated Search view can show cover art + track counts + sizes without a
+ * follow-up fetch per result.
+ */
+export interface SearchTrackHit {
+  id: number;
+  title: string;
+  artist: string | null;
+  album: string | null;
+  albumId: number | null;
+  artistId: number | null;
+  durationSec: number | null;
+  coverArtPath: string | null;
+  path: string;
+}
+export interface SearchAlbumHit {
+  id: number;
+  title: string;
+  artist: string | null;
+  coverArtPath: string | null;
+  year: number | null;
+  trackCount: number;
+  bytes: number;
+}
+export interface SearchArtistHit {
+  id: number;
+  name: string;
+  trackCount: number;
+  albumCount: number;
+}
+export interface SearchResults {
+  tracks: SearchTrackHit[];
+  albums: SearchAlbumHit[];
+  artists: SearchArtistHit[];
+}
+
+export interface LargestAlbum {
+  id: number;
+  title: string;
+  artist: string | null;
+  coverArtPath: string | null;
+  trackCount: number;
+  bytes: number;
+}

@@ -196,6 +196,10 @@ export const usePlayer = create<PlayerState>((set, get) => {
     // silent buffers for privacy reasons). Radio stations may have turned
     // this off; restore it every time we play a local track.
     engine.element.crossOrigin = 'anonymous';
+    // Honour the current repeat-one setting on every new track load — the
+    // previous track may have left loop=false (or we're coming back from
+    // radio mode, which cleared the attribute).
+    engine.element.loop = (get().repeatMode === 'one');
     engine.setSrc(url);
     // Prime the displayed duration from the DB-parsed tag value so the right-
     // hand time readout shows something immediately. The HTMLAudioElement's
@@ -410,11 +414,19 @@ export const usePlayer = create<PlayerState>((set, get) => {
       });
     },
 
-    setRepeatMode(m) { set({ repeatMode: m }); },
+    setRepeatMode(m) {
+      // Use the HTMLAudioElement's native `loop` for repeat-one — it's more
+      // reliable than restarting on the 'ended' event (which occasionally
+      // fails to re-trigger on some codecs). For 'off' / 'all', leave loop
+      // disabled so the 'ended' handler can advance the queue.
+      engine.element.loop = (m === 'one');
+      set({ repeatMode: m });
+    },
     cycleRepeat() {
       const order: RepeatMode[] = ['off', 'all', 'one'];
       const s = get();
       const next = order[(order.indexOf(s.repeatMode) + 1) % order.length];
+      engine.element.loop = (next === 'one');
       set({ repeatMode: next });
     },
 

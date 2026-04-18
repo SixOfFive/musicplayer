@@ -1,5 +1,7 @@
+import { useNavigate } from 'react-router-dom';
 import { usePlayer } from '../store/player';
 import { mediaUrl } from '../lib/mediaUrl';
+import { parseRadioTitle } from '../lib/parseRadioTitle';
 
 function fmt(sec: number) {
   if (!Number.isFinite(sec)) return '0:00';
@@ -14,9 +16,25 @@ export default function NowPlayingBar() {
     shuffle, toggleShuffle, repeatMode, cycleRepeat,
     radio,
   } = usePlayer();
+  const nav = useNavigate();
   const cur = queue[index];
   const liked = cur ? likedIds.has(cur.id) : false;
   const isRadio = radio != null;
+
+  // Like-from-radio: parse the ICY StreamTitle into artist + track name and
+  // navigate to /search with those fields as URL params. SearchView's
+  // cascading fallback takes it from there (title+artist → title → artist).
+  function likeRadioTrack() {
+    if (!radio?.nowPlaying) return;
+    const parsed = parseRadioTitle(radio.nowPlaying);
+    const qp = new URLSearchParams();
+    if (parsed.title) qp.set('title', parsed.title);
+    if (parsed.artist) qp.set('artist', parsed.artist);
+    // Album isn't available from ICY — cascade will skip tier 1 (title+
+    // artist+album) and start at tier 2 (title+artist). Kept as a param
+    // placeholder for the day we support stations that do advertise it.
+    nav(`/search?${qp.toString()}`);
+  }
 
   const repeatTitle =
     repeatMode === 'off' ? 'Repeat: off'
@@ -45,8 +63,18 @@ export default function NowPlayingBar() {
                   station name + codec details to the subtitle. Before any
                   metadata has arrived (or on HLS/non-ICY streams), the
                   station name stays up top so the UI isn't blank. */}
-              <div className="text-sm text-text-primary truncate">
-                {radio!.nowPlaying || radio!.station}
+              <div className="text-sm text-text-primary truncate flex items-center gap-2">
+                <span className="truncate">{radio!.nowPlaying || radio!.station}</span>
+                {radio!.nowPlaying && (
+                  <button
+                    onClick={likeRadioTrack}
+                    className="text-text-muted hover:text-accent text-base flex-shrink-0"
+                    title={`Find "${radio!.nowPlaying}" in your library`}
+                    aria-label="Find this song in library"
+                  >
+                    ♡
+                  </button>
+                )}
               </div>
               <div className="text-xs text-text-muted truncate">
                 <span className="text-accent font-semibold">LIVE</span>

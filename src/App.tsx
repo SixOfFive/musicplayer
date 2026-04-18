@@ -17,6 +17,7 @@ import PlaylistView from './views/PlaylistView';
 import PlaylistsView from './views/PlaylistsView';
 import RadioView from './views/RadioView';
 import LastFmView from './views/LastFmView';
+import SearchView from './views/SearchView';
 import Settings from './views/Settings';
 import Visualizer from './views/Visualizer';
 import { useLibrary } from './store/library';
@@ -54,6 +55,7 @@ export default function App() {
               <Route path="/artist/:id" element={<ArtistView />} />
               <Route path="/playlists" element={<PlaylistsView />} />
               <Route path="/playlist/:id" element={<PlaylistView />} />
+              <Route path="/search" element={<SearchView />} />
               <Route path="/radio" element={<RadioView />} />
               <Route path="/lastfm" element={<LastFmView />} />
               <Route path="/visualizer" element={<Visualizer />} />

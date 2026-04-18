@@ -36,6 +36,7 @@ export default function Sidebar() {
 
       <nav className="px-3 pt-2 space-y-1">
         <NavItem to="/" label="Home" />
+        <NavItem to="/search" label="Search" />
         <NavItem to="/library" label="Library" />
         <NavItem to="/albums" label="Albums" />
         <NavItem to="/artists" label="Artists" />
