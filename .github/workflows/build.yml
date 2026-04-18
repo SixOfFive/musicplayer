@@ -31,6 +31,10 @@ jobs:
             artifact_glob: 'release/*.dmg'
             artifact_name: macos-dmg
     runs-on: ${{ matrix.os }}
+    # Write permission needed so electron-builder's --publish always can
+    # create/append the GitHub Release on tag pushes.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -62,12 +66,27 @@ jobs:
       - name: Build Vite + TypeScript
         run: npm run build
 
-      - name: Build installer
+      - name: Build installer (non-tag)
+        # On regular main pushes we only produce the installer as a workflow
+        # artifact. No Release, no latest.yml. Lets devs verify the build
+        # passes without polluting the public Releases page.
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         run: npx electron-builder --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: false
-          # Silence an electron-builder prompt that would hang CI.
+          USE_HARD_LINKS: false
+
+      - name: Build installer (tag — publishes to Release)
+        # On v* tag pushes, publish directly from each runner so
+        # electron-builder uploads its latest.yml / latest-mac.yml /
+        # latest-linux.yml metadata alongside the installers. Without those
+        # files, electron-updater in installed builds can't find updates.
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        run: npx electron-builder --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: false
           USE_HARD_LINKS: false
 
       # Always list what's in the release dir so we can see if the artifact
@@ -86,19 +105,3 @@ jobs:
           path: ${{ matrix.artifact_glob }}
           if-no-files-found: error
 
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist-installers
-
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist-installers/**/*
-          generate_release_notes: true

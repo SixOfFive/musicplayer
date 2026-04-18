@@ -19,6 +19,7 @@
     "better-sqlite3": "^12.2.0",
     "butterchurn": "^2.6.7",
     "butterchurn-presets": "^2.4.7",
+    "electron-updater": "^6.8.3",
     "ffmpeg-static": "^5.2.0",
     "music-metadata": "^10.5.0",
     "react": "^18.3.1",
@@ -27,6 +28,7 @@
     "zustand": "^4.5.4"
   },
   "devDependencies": {
+    "@electron/rebuild": "^3.7.1",
     "@types/better-sqlite3": "^7.6.11",
     "@types/node": "^22.5.0",
     "@types/react": "^18.3.3",
@@ -34,7 +36,6 @@
     "@vitejs/plugin-react": "^4.3.1",
     "autoprefixer": "^10.4.20",
     "concurrently": "^8.2.2",
-    "@electron/rebuild": "^3.7.1",
     "electron": "^32.0.0",
     "electron-builder": "^25.0.5",
     "postcss": "^8.4.41",
@@ -65,15 +66,36 @@
     ],
     "mac": {
       "category": "public.app-category.music",
-      "target": [ "dmg" ]
+      "target": [
+        "dmg"
+      ]
     },
     "linux": {
       "category": "AudioVideo;Audio;Player;",
-      "target": [ "deb", "rpm", "tar.gz" ]
+      "target": [
+        "deb",
+        "rpm",
+        "tar.gz"
+      ]
     },
     "win": {
-      "target": [ { "target": "nsis", "arch": [ "x64" ] } ]
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
     },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "SixOfFive",
+        "repo": "musicplayer",
+        "releaseType": "release"
+      }
+    ],
     "nsis": {
       "oneClick": false,
       "allowElevation": true,

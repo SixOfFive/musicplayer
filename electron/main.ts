@@ -10,6 +10,7 @@ import { registerPlaylistsIpc } from './ipc/playlists';
 import { registerStatsIpc } from './ipc/stats';
 import { registerConvertIpc } from './ipc/convert';
 import { registerUpdateIpc } from './ipc/update';
+import { setAutoUpdaterWindow } from './services/updater';
 import { importPlaylistsFromFolder } from './services/playlist-export';
 import { initDatabase } from './services/db';
 import { initSettings, getSettings } from './services/settings-store';
@@ -131,6 +132,7 @@ app.whenReady().then(async () => {
   registerStatsIpc(ipcMain);
   registerConvertIpc(ipcMain, () => mainWindow);
   registerUpdateIpc(ipcMain);
+  setAutoUpdaterWindow(() => mainWindow);
 
   // Debug: toggle DevTools on demand (used by Settings → About & Updates).
   ipcMain.handle('debug:toggle-devtools', () => {

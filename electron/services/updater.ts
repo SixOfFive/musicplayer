@@ -1,4 +1,4 @@
-import { app } from 'electron';
+import { app, BrowserWindow } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { execFile } from 'node:child_process';
@@ -10,11 +10,44 @@ const exec = promisify(execFile);
 
 /**
  * True when the app was packaged by electron-builder (installer/.exe build).
- * In this mode there's no `.git` directory, `npm` isn't on the end-user's
- * PATH, and updates happen by downloading a new installer from GitHub
- * Releases — NOT by git pull.
+ * In packaged builds we use electron-updater to download + apply a new
+ * installer from GitHub Releases. In dev / source-cloned builds we use
+ * `git pull --ff-only` against the project directory.
  */
 function isPackaged(): boolean { return app.isPackaged; }
+
+// ---- electron-updater integration (packaged builds only) -------------------
+// Loaded lazily so a missing dep doesn't break `npm run electron:dev` during
+// development (in dev mode isPackaged() returns false so we never reach this).
+let _autoUpdater: typeof import('electron-updater').autoUpdater | null = null;
+let autoUpdaterInitialised = false;
+let mainWindowGetter: () => BrowserWindow | null = () => null;
+
+export function setAutoUpdaterWindow(getter: () => BrowserWindow | null) {
+  mainWindowGetter = getter;
+}
+
+async function getAutoUpdater() {
+  if (_autoUpdater) return _autoUpdater;
+  const mod = await import('electron-updater');
+  _autoUpdater = mod.autoUpdater;
+  if (!autoUpdaterInitialised) {
+    autoUpdaterInitialised = true;
+    // Pipe electron-updater's internal events to the renderer so the banner
+    // can show download progress + "ready to install" UI.
+    const emit = (channel: string, payload?: unknown) =>
+      mainWindowGetter()?.webContents.send(channel, payload);
+    _autoUpdater.autoDownload = true;           // start download as soon as update is detected
+    _autoUpdater.autoInstallOnAppQuit = true;   // apply the update when the user next quits
+    _autoUpdater.on('checking-for-update', () => emit('update:auto-event', { kind: 'checking' }));
+    _autoUpdater.on('update-available', (info) => emit('update:auto-event', { kind: 'available', info }));
+    _autoUpdater.on('update-not-available', (info) => emit('update:auto-event', { kind: 'none', info }));
+    _autoUpdater.on('error', (err) => emit('update:auto-event', { kind: 'error', message: err?.message ?? String(err) }));
+    _autoUpdater.on('download-progress', (p) => emit('update:auto-event', { kind: 'progress', percent: p.percent, transferred: p.transferred, total: p.total, bytesPerSecond: p.bytesPerSecond }));
+    _autoUpdater.on('update-downloaded', (info) => emit('update:auto-event', { kind: 'downloaded', info }));
+  }
+  return _autoUpdater;
+}
 
 // Where this Electron process was started from — doubles as the project root
 // in dev mode. In packaged builds the git repo isn't shipped, so updates via
@@ -68,6 +101,40 @@ export async function checkForUpdates(): Promise<UpdateCheckResult> {
   const currentVersion = await readPkgVersion();
   const currentSha = await readLocalSha();
   const dirty = await isDirty();
+
+  // Packaged path: let electron-updater consult GitHub Releases directly.
+  // It compares the version in our package.json with the latest release tag
+  // and, if newer, starts the download (autoDownload = true).
+  if (isPackaged()) {
+    try {
+      const updater = await getAutoUpdater();
+      const res: any = await updater.checkForUpdates();
+      const info = res?.updateInfo;
+      const latestVer = info?.version ?? null;
+      const upToDate = !latestVer || latestVer === currentVersion;
+      return {
+        upToDate,
+        currentVersion,
+        currentSha,
+        latestSha: null,
+        commitsBehind: upToDate ? 0 : null,
+        latestMessage: info?.releaseName ?? info?.releaseNotes ?? null,
+        latestDate: info?.releaseDate ?? null,
+        dirtyWorkingTree: false,
+        error: null,
+        upstreamUrl,
+      };
+    } catch (err: any) {
+      return {
+        upToDate: true,
+        currentVersion, currentSha, latestSha: null,
+        commitsBehind: null, latestMessage: null, latestDate: null,
+        dirtyWorkingTree: false,
+        error: err?.message ?? 'electron-updater error',
+        upstreamUrl,
+      };
+    }
+  }
 
   try {
     const r = await fetch(`https://api.github.com/repos/${repoSlug}/commits/${branch}`, {
@@ -144,10 +211,32 @@ export interface ApplyUpdateResult {
  */
 export async function applyUpdate(): Promise<ApplyUpdateResult> {
   if (isPackaged()) {
-    return {
-      ok: false, needsRestart: false, newSha: null, pulledCommits: 0,
-      message: 'In installed builds, updates require downloading a new installer from the Releases page.',
-    };
+    // Packaged path: electron-updater downloaded the new installer in the
+    // background the moment `checkForUpdates()` ran (autoDownload = true in
+    // getAutoUpdater). Calling `quitAndInstall()` closes the window, runs
+    // the NSIS installer silently, and restarts the app on the new version.
+    try {
+      const updater = await getAutoUpdater();
+      // `isUpdaterActive` is `true` only in packaged builds with a valid
+      // publish config — guards against misconfig in dev-like scenarios.
+      if (!updater.isUpdaterActive()) {
+        return {
+          ok: false, needsRestart: false, newSha: null, pulledCommits: 0,
+          message: 'Auto-updater is not available in this build.',
+        };
+      }
+      // setImmediate so this IPC handler can return before the app quits.
+      setImmediate(() => updater.quitAndInstall());
+      return {
+        ok: true, needsRestart: true, newSha: null, pulledCommits: 1,
+        message: 'Installing update and restarting…',
+      };
+    } catch (err: any) {
+      return {
+        ok: false, needsRestart: false, newSha: null, pulledCommits: 0,
+        message: `Auto-update failed: ${err?.message ?? err}`,
+      };
+    }
   }
   const settings = getSettings();
   const { branch } = settings.update;

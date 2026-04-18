@@ -69,6 +69,11 @@ const api = {
     info: () => ipcRenderer.invoke(IPC.UPDATE_INFO),
     check: () => ipcRenderer.invoke(IPC.UPDATE_CHECK),
     apply: () => ipcRenderer.invoke(IPC.UPDATE_APPLY),
+    onAutoEvent: (cb: (e: unknown) => void) => {
+      const listener = (_: unknown, payload: unknown) => cb(payload);
+      ipcRenderer.on('update:auto-event', listener);
+      return () => ipcRenderer.removeListener('update:auto-event', listener);
+    },
   },
   debug: {
     toggleDevTools: () => ipcRenderer.invoke(IPC.DEBUG_TOGGLE_DEVTOOLS),
