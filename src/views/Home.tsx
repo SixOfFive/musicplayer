@@ -44,7 +44,7 @@ export default function Home() {
   }
 
   const load = useCallback(() => {
-    window.mp.library.albums({ limit: 12, sortBy: 'title', sortDir: 'asc' }).then(setAlbums);
+    window.mp.library.albums({ limit: 12, sortBy: 'date_added', sortDir: 'desc' }).then(setAlbums);
     window.mp.library.stats().then(setStats);
   }, []);
   useEffect(() => { load(); }, [load]);
@@ -88,7 +88,7 @@ export default function Home() {
       {/* Albums grid */}
       {hasLibrary && (
         <div className="mb-8">
-          <h2 className="text-xl font-semibold mb-3">Your albums</h2>
+          <h2 className="text-xl font-semibold mb-3">Newest albums</h2>
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-4">
             {albums.map((a) => <AlbumCard key={a.id} album={a} sizeThreshold={stats?.albumSizeThresholdBytes} />)}
           </div>

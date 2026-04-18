@@ -387,7 +387,7 @@ export interface TrackQuery {
   sortDir?: SortDir;
 }
 
-export type AlbumSort = 'title' | 'artist' | 'year' | 'genre' | 'track_count';
+export type AlbumSort = 'title' | 'artist' | 'year' | 'genre' | 'track_count' | 'date_added';
 
 export interface AlbumQuery {
   limit?: number;

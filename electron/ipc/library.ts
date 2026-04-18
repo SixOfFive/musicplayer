@@ -21,6 +21,7 @@ const ALBUM_SORT_COL: Record<AlbumSort, string> = {
   year: 'al.year',
   genre: 'al.genre',
   track_count: 'track_count',
+  date_added: 'date_added',
 };
 
 export function registerLibraryIpc(ipcMain: IpcMain, _getWin: () => BrowserWindow | null) {
@@ -81,7 +82,8 @@ export function registerLibraryIpc(ipcMain: IpcMain, _getWin: () => BrowserWindo
         SELECT al.id, al.title, al.year, al.genre, al.cover_art_path, ar.name AS artist,
                (SELECT COUNT(*) FROM tracks t WHERE t.album_id = al.id) AS track_count,
                (SELECT COALESCE(SUM(size), 0) FROM tracks t WHERE t.album_id = al.id) AS bytes,
-               (SELECT COUNT(*) FROM tracks t WHERE t.album_id = al.id AND LOWER(t.path) LIKE '%.flac') AS flac_count
+               (SELECT COUNT(*) FROM tracks t WHERE t.album_id = al.id AND LOWER(t.path) LIKE '%.flac') AS flac_count,
+               (SELECT MAX(date_added) FROM tracks t WHERE t.album_id = al.id) AS date_added
         FROM albums al
         LEFT JOIN artists ar ON ar.id = al.artist_id
         ${where}
