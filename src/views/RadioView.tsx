@@ -2,6 +2,44 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { RadioStation, RadioTag } from '../../shared/types';
 import { usePlayer } from '../store/player';
 import LoadingStrip from '../components/LoadingStrip';
+import MiniVisualizer from '../components/MiniVisualizer';
+
+/**
+ * Classify a station's stream URL into a user-facing protocol label. This is
+ * a URL-shape heuristic — we can't know whether a "Direct" station actually
+ * sends ICY metadata until we connect to it (the server advertises that via
+ * the `icy-metaint` response header). So "Direct" just means "not HLS"; the
+ * now-playing line in the player will remain blank if the server doesn't
+ * support ICY.
+ */
+function streamType(url: string): { label: string; tooltip: string; className: string } {
+  if (/\.m3u8(\?|$)/i.test(url)) {
+    return {
+      label: 'HLS',
+      tooltip: 'HTTP Live Streaming — segment-based. No inline track metadata; only the station name is shown while playing.',
+      className: 'bg-blue-500/20 text-blue-300 border-blue-500/30',
+    };
+  }
+  if (/\.mpd(\?|$)/i.test(url)) {
+    return {
+      label: 'DASH',
+      tooltip: 'MPEG-DASH — segment-based. Not currently supported for playback.',
+      className: 'bg-purple-500/20 text-purple-300 border-purple-500/30',
+    };
+  }
+  if (/\.(pls|m3u)(\?|$)/i.test(url)) {
+    return {
+      label: 'Playlist',
+      tooltip: '.pls / .m3u playlist file — the player follows the first entry inside.',
+      className: 'bg-amber-500/20 text-amber-300 border-amber-500/30',
+    };
+  }
+  return {
+    label: 'Direct',
+    tooltip: 'Direct HTTP audio stream (Icecast/Shoutcast). Usually carries ICY metadata — the current track title will appear in the player if supported.',
+    className: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30',
+  };
+}
 
 type Mode = 'popular' | 'trending' | 'search' | 'tag' | 'country';
 
@@ -80,6 +118,7 @@ export default function RadioView() {
       country: s.country || null,
       codec: s.codec || null,
       bitrate: s.bitrate || null,
+      nowPlaying: null, // filled in by the ICY sniffer once metadata arrives
     });
     // Best-effort click-count bump so Radio-Browser's trending list reflects use.
     window.mp.radio.click(s.stationuuid);
@@ -87,14 +126,17 @@ export default function RadioView() {
 
   return (
     <section className="p-8">
-      <header className="mb-6">
-        <div className="text-xs uppercase tracking-wide text-text-muted">Internet</div>
-        <h1 className="text-4xl font-extrabold my-1">Radio</h1>
-        <p className="text-sm text-text-muted">
-          Tens of thousands of live stations worldwide, via the community-maintained{' '}
-          <a onClick={() => window.open('https://www.radio-browser.info/', '_blank')} className="text-accent cursor-pointer hover:underline">Radio-Browser</a> directory.
-          Click any station to start streaming — no account needed.
-        </p>
+      <header className="mb-6 flex items-end gap-6">
+        <div className="min-w-0 flex-1">
+          <div className="text-xs uppercase tracking-wide text-text-muted">Internet</div>
+          <h1 className="text-4xl font-extrabold my-1">Radio</h1>
+          <p className="text-sm text-text-muted">
+            Tens of thousands of live stations worldwide, via the community-maintained{' '}
+            <a onClick={() => window.open('https://www.radio-browser.info/', '_blank')} className="text-accent cursor-pointer hover:underline">Radio-Browser</a> directory.
+            Click any station to start streaming — no account needed.
+          </p>
+        </div>
+        <MiniVisualizer className="hidden md:block w-64 h-36 flex-shrink-0 self-end" />
       </header>
 
       {/* Mode tabs */}
@@ -161,7 +203,9 @@ export default function RadioView() {
       {!loading && stations.length > 0 && (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
           {stations.map((s) => {
-            const isPlaying = currentRadioUrl != null && currentRadioUrl === (s.url_resolved || s.url);
+            const url = s.url_resolved || s.url;
+            const isPlaying = currentRadioUrl != null && currentRadioUrl === url;
+            const st = streamType(url);
             return (
               <div
                 key={s.stationuuid}
@@ -184,6 +228,16 @@ export default function RadioView() {
                     {s.tags ? ` · ${s.tags.split(',').slice(0, 3).join(', ')}` : ''}
                   </div>
                 </div>
+                {/* Stream-type badge. Color-coded so you can eyeball HLS
+                    (blue) vs raw Direct (green) at a glance — relevant
+                    because only Direct streams carry ICY "now playing"
+                    metadata. Hover for the full explanation. */}
+                <span
+                  title={st.tooltip}
+                  className={`text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded border flex-shrink-0 ${st.className}`}
+                >
+                  {st.label}
+                </span>
                 {isPlaying && (
                   <div className="text-[10px] text-accent font-semibold uppercase tracking-wider flex-shrink-0">Live</div>
                 )}

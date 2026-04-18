@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, protocol, net } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, protocol, net, session } from 'electron';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { registerSettingsIpc } from './ipc/settings';
@@ -118,10 +118,56 @@ function registerMediaProtocol() {
   });
 }
 
+/**
+ * Universal CORS unlocker for radio streams.
+ *
+ * Problem: internet radio servers (Icecast, Shoutcast) almost never send the
+ * `Access-Control-Allow-Origin` response header. Without it the renderer's
+ * Web Audio `MediaElementAudioSourceNode` refuses to pass audio samples
+ * (Chromium mutes tainted cross-origin streams). Result: no audio AND no
+ * visualizer even though the HTTP fetch succeeds.
+ *
+ * Fix: intercept every response in the default session and prepend
+ * `Access-Control-Allow-Origin: *`. The browser then sees a CORS-approved
+ * response and Web Audio lets the samples through. Since this app has a
+ * single trusted origin (the local renderer), rewriting CORS on inbound
+ * traffic is safe — there are no other browser contexts that could be
+ * tricked into reading cross-origin data they shouldn't.
+ *
+ * Skips mp-media:// (local file protocol) which already has its own CORS
+ * handling, and anything on localhost/127.0.0.1 (dev server / local mirrors).
+ */
+function enableUniversalCors() {
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    try {
+      const u = details.url;
+      if (u.startsWith('mp-media:') || u.startsWith('file:') || /^https?:\/\/(localhost|127\.0\.0\.1)/.test(u)) {
+        callback({});
+        return;
+      }
+      const headers = { ...(details.responseHeaders ?? {}) };
+      // Drop any existing CORS header (regardless of casing) so we don't end
+      // up with duplicates or a restrictive policy the server tried to set.
+      for (const k of Object.keys(headers)) {
+        if (k.toLowerCase() === 'access-control-allow-origin' ||
+            k.toLowerCase() === 'access-control-allow-credentials') {
+          delete headers[k];
+        }
+      }
+      headers['Access-Control-Allow-Origin'] = ['*'];
+      callback({ responseHeaders: headers });
+    } catch {
+      // Never block the response on a failure in our header rewriter.
+      callback({});
+    }
+  });
+}
+
 app.whenReady().then(async () => {
   await initSettings();
   await initDatabase();
 
+  enableUniversalCors();
   registerMediaProtocol();
 
   registerSettingsIpc(ipcMain);
@@ -134,7 +180,7 @@ app.whenReady().then(async () => {
   registerStatsIpc(ipcMain);
   registerConvertIpc(ipcMain, () => mainWindow);
   registerUpdateIpc(ipcMain);
-  registerRadioIpc(ipcMain);
+  registerRadioIpc(ipcMain, () => mainWindow);
   registerLastFmIpc(ipcMain);
   setAutoUpdaterWindow(() => mainWindow);
 

@@ -2,6 +2,8 @@
 // (a) we still get native codec support (mp3/flac/wav/m4a/opus/ogg) and
 // (b) visualizer plugins get frequency/waveform/beat data every frame.
 
+import Hls from 'hls.js';
+
 export interface AudioFrame {
   // Time
   timeSec: number;           // audio element currentTime
@@ -58,6 +60,12 @@ export class AudioEngine {
   private readonly waveBytes: Uint8Array<ArrayBuffer>;
   private readonly freqFloat: Float32Array<ArrayBuffer>;
   private readonly waveFloat: Float32Array<ArrayBuffer>;
+
+  // hls.js instance — lazily created when the source is an HLS playlist.
+  // Chromium's HTMLMediaElement doesn't support HLS natively (only Safari
+  // does), so we need MSE-based playback via hls.js for .m3u8 URLs. Kept
+  // as a field so we can tear it down when switching sources.
+  private hls: Hls | null = null;
 
   private listeners = new Set<FrameListener>();
   private rafId: number | null = null;
@@ -128,6 +136,43 @@ export class AudioEngine {
   }
 
   setSrc(url: string) {
+    // Always tear down any prior hls.js instance first — attaching a new
+    // source while one is live leaks listeners and glitches the element.
+    if (this.hls) {
+      try { this.hls.destroy(); } catch { /* noop */ }
+      this.hls = null;
+    }
+
+    // HLS playlists (.m3u8) aren't natively playable in Chromium. Route them
+    // through hls.js, which feeds MPEG-TS / fMP4 segments into the element
+    // via MediaSource Extensions. The element sees a blob: URL that Web Audio
+    // treats as same-origin, so the visualizer analyser keeps working.
+    const isHls = /\.m3u8(\?|$)/i.test(url);
+    if (isHls && Hls.isSupported()) {
+      console.log(`[AudioEngine] HLS source detected — using hls.js | url=${url}`);
+      // hls.js fetches segments over XHR/fetch and feeds them into an MSE
+      // SourceBuffer, producing a blob: URL that Web Audio treats as
+      // same-origin — so the MediaElementSource muting that bites raw
+      // non-CORS streams doesn't apply here. Put crossOrigin back in case
+      // the player store dropped it for a previous raw-stream attempt.
+      this.element.crossOrigin = 'anonymous';
+      const hls = new Hls({
+        // Keep latency reasonable for live radio; these are conservative
+        // defaults and can be tuned later if specific stations misbehave.
+        lowLatencyMode: false,
+        enableWorker: true,
+      });
+      hls.on(Hls.Events.ERROR, (_evt, data) => {
+        if (data.fatal) {
+          console.error(`[AudioEngine] hls.js fatal error | type=${data.type} | details=${data.details}`);
+        }
+      });
+      hls.loadSource(url);
+      hls.attachMedia(this.element);
+      this.hls = hls;
+      return;
+    }
+
     this.element.src = url;
     this.element.load();
   }

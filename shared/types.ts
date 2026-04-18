@@ -318,6 +318,9 @@ export const IPC = {
   RADIO_BY_COUNTRY: 'radio:by-country',
   RADIO_TAGS: 'radio:tags',
   RADIO_CLICK: 'radio:click',
+  RADIO_START_SNIFF: 'radio:start-sniff',
+  RADIO_STOP_SNIFF: 'radio:stop-sniff',
+  RADIO_NOW_PLAYING: 'radio:now-playing', // main -> renderer push event
   // Last.fm
   LASTFM_STATUS: 'lastfm:status',
   LASTFM_BEGIN_AUTH: 'lastfm:begin-auth',

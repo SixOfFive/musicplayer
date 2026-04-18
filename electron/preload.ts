@@ -103,6 +103,13 @@ const api = {
     byCountry: (cc: string, limit?: number) => ipcRenderer.invoke(IPC.RADIO_BY_COUNTRY, cc, limit),
     tags: (limit?: number) => ipcRenderer.invoke(IPC.RADIO_TAGS, limit),
     click: (uuid: string) => ipcRenderer.invoke(IPC.RADIO_CLICK, uuid),
+    startSniff: (streamUrl: string) => ipcRenderer.invoke(IPC.RADIO_START_SNIFF, streamUrl),
+    stopSniff: () => ipcRenderer.invoke(IPC.RADIO_STOP_SNIFF),
+    onNowPlaying: (cb: (payload: { streamUrl: string; title: string | null }) => void) => {
+      const listener = (_: unknown, payload: any) => cb(payload);
+      ipcRenderer.on(IPC.RADIO_NOW_PLAYING, listener);
+      return () => ipcRenderer.removeListener(IPC.RADIO_NOW_PLAYING, listener);
+    },
   },
   convert: {
     checkAvailable: () => ipcRenderer.invoke(IPC.CONVERT_CHECK_AVAILABLE),

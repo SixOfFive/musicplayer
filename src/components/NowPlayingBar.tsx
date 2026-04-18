@@ -40,9 +40,17 @@ export default function NowPlayingBar() {
         <div className="min-w-0">
           {isRadio ? (
             <>
-              <div className="text-sm text-text-primary truncate">{radio!.station}</div>
+              {/* When ICY metadata is available, promote the on-air track to
+                  the main line (like a normal song title) and relegate the
+                  station name + codec details to the subtitle. Before any
+                  metadata has arrived (or on HLS/non-ICY streams), the
+                  station name stays up top so the UI isn't blank. */}
+              <div className="text-sm text-text-primary truncate">
+                {radio!.nowPlaying || radio!.station}
+              </div>
               <div className="text-xs text-text-muted truncate">
                 <span className="text-accent font-semibold">LIVE</span>
+                {radio!.nowPlaying ? ` · ${radio!.station}` : ''}
                 {radio!.country ? ` · ${radio!.country}` : ''}
                 {radio!.codec ? ` · ${radio!.codec}` : ''}
                 {radio!.bitrate ? ` · ${radio!.bitrate}kbps` : ''}

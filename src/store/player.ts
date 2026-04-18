@@ -21,6 +21,10 @@ export interface RadioNowPlaying {
   country: string | null;
   codec: string | null;
   bitrate: number | null;
+  // ICY `StreamTitle` scraped by the main-process sniffer. null before the
+  // first metadata frame arrives, or on servers / HLS streams that don't
+  // support inline metadata. Updated in-place as the on-air track changes.
+  nowPlaying: string | null;
 }
 
 interface PlayerState {
@@ -272,6 +276,19 @@ export const usePlayer = create<PlayerState>((set, get) => {
   window.addEventListener('beforeunload', () => {
     const completed = accountingDurationSec ? accountedSec / accountingDurationSec > 0.5 : false;
     flushAccounting(completed);
+    // Tear down any active ICY sniffer so the main process closes its HTTP
+    // connection before we exit.
+    try { window.mp.radio.stopSniff(); } catch { /* noop */ }
+  });
+
+  // Subscribe to ICY metadata pushes from main. Main only emits when the
+  // currently-playing station matches — we also double-check streamUrl here
+  // so a stale event for a previous station can't overwrite current title.
+  window.mp.radio.onNowPlaying(({ streamUrl, title }) => {
+    const s = get();
+    if (!s.radio || s.radio.streamUrl !== streamUrl) return;
+    console.log(`[player] radio nowPlaying | "${title ?? '(none)'}"`);
+    set({ radio: { ...s.radio, nowPlaying: title } });
   });
 
   return {
@@ -289,7 +306,10 @@ export const usePlayer = create<PlayerState>((set, get) => {
 
     async play(items, startIndex = 0) {
       flushAccounting(accountingDurationSec ? accountedSec / accountingDurationSec > 0.5 : false);
-      // Switching to local files clears radio mode.
+      // Switching to local files clears radio mode. Also stop the ICY sniffer
+      // — it's a separate main-process HTTP connection that otherwise leaks
+      // until the next playRadio or app exit.
+      try { window.mp.radio.stopSniff(); } catch { /* noop */ }
       set({ radio: null });
 
       // Honour the current shuffle toggle: if on, reshuffle the new queue.
@@ -324,17 +344,26 @@ export const usePlayer = create<PlayerState>((set, get) => {
       accountedSec = 0;
       lastTickAt = null;
 
-      set({ radio: station, queue: [], originalQueue: [], index: -1, duration: 0, position: 0 });
+      // Normalize incoming station shape — callers may not set `nowPlaying`,
+      // but the reducer expects it to exist. Start null; the ICY sniffer
+      // fills it in as track metadata arrives.
+      const fresh: RadioNowPlaying = { ...station, nowPlaying: null };
+      set({ radio: fresh, queue: [], originalQueue: [], index: -1, duration: 0, position: 0 });
       console.log(`[player] playRadio | station="${station.station}" | url=${station.streamUrl}`);
-      // Radio streams are cross-origin. Keeping crossOrigin='anonymous' is what
-      // unlocked Web Audio analysis for the visualizer on local files; many
-      // radio servers don't send CORS headers, which would silence analysis.
-      // We drop crossOrigin so audio plays; the visualizer gets quiet on
-      // stations that don't allow CORS but still works on those that do.
-      engine.element.removeAttribute('crossorigin');
+      // crossOrigin='anonymous' is required for MediaElementSource to see
+      // audio samples. The main process injects `Access-Control-Allow-Origin:
+      // *` on every response (see electron/main.ts), so servers that don't
+      // natively send CORS headers appear CORS-approved to the browser.
+      // Result: both visualizer and audio work on raw radio streams.
+      engine.element.crossOrigin = 'anonymous';
       engine.setSrc(station.streamUrl);
       try { await engine.play(); }
       catch (err) { console.error('[player] radio play failed', err); }
+
+      // Kick off ICY metadata sniff. IPC handler no-ops when the URL ends in
+      // .m3u8 or the server doesn't advertise `icy-metaint`.
+      try { await window.mp.radio.startSniff(station.streamUrl); }
+      catch (err) { console.error('[player] radio startSniff failed', err); }
     },
 
     toggle() {
