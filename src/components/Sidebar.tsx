@@ -41,6 +41,7 @@ export default function Sidebar() {
         <NavItem to="/artists" label="Artists" />
         <NavItem to="/playlists" label="Playlists" />
         <NavItem to="/radio" label="Radio" />
+        <NavItem to="/lastfm" label="Last.fm" />
         <NavItem to="/visualizer" label="Visualizer" />
       </nav>
 

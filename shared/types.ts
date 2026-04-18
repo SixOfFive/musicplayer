@@ -172,12 +172,31 @@ export interface PlaylistExportSettings {
   exportLiked: boolean;
 }
 
+export interface LastFmSettings {
+  // User-registered Last.fm API credentials (created at
+  // https://www.last.fm/api/account/create). Key is public; secret signs
+  // mutating calls like scrobble.
+  apiKey: string;
+  apiSecret: string;
+  // Long-lived session key obtained via the auth.getToken → browser-auth →
+  // auth.getSession flow. Valid indefinitely; cleared on Disconnect.
+  sessionKey: string;
+  username: string;
+  // Enable/disable scrobbling without disconnecting the account.
+  scrobbleEnabled: boolean;
+  // Minimum seconds listened before a track is eligible to scrobble.
+  // Last.fm's own rule: ≥ 30 sec AND (≥ 4 min OR ≥ 50% of duration).
+  // This is the 30-second floor; the other half is computed at call time.
+  minScrobbleSec: number;
+}
+
 export interface AppSettings {
   firstRunComplete: boolean;
   conversion: ConversionSettings;
   playlistExport: PlaylistExportSettings;
   update: UpdateSettings;
   debug: DebugSettings;
+  lastfm: LastFmSettings;
   library: {
     directories: LibraryDirectory[];
     databasePath: string;
@@ -299,7 +318,55 @@ export const IPC = {
   RADIO_BY_COUNTRY: 'radio:by-country',
   RADIO_TAGS: 'radio:tags',
   RADIO_CLICK: 'radio:click',
+  // Last.fm
+  LASTFM_STATUS: 'lastfm:status',
+  LASTFM_BEGIN_AUTH: 'lastfm:begin-auth',
+  LASTFM_FINISH_AUTH: 'lastfm:finish-auth',
+  LASTFM_DISCONNECT: 'lastfm:disconnect',
+  LASTFM_SET_KEYS: 'lastfm:set-keys',
+  LASTFM_SET_SCROBBLE: 'lastfm:set-scrobble',
+  LASTFM_PROFILE: 'lastfm:profile',
+  LASTFM_USER_TOP_ARTISTS: 'lastfm:user-top-artists',
+  LASTFM_USER_TOP_TRACKS: 'lastfm:user-top-tracks',
+  LASTFM_USER_TOP_ALBUMS: 'lastfm:user-top-albums',
+  LASTFM_USER_RECENT: 'lastfm:user-recent',
+  LASTFM_CHARTS_ARTISTS: 'lastfm:charts-artists',
+  LASTFM_CHARTS_TRACKS: 'lastfm:charts-tracks',
+  LASTFM_NOW_PLAYING: 'lastfm:now-playing',
+  LASTFM_SCROBBLE: 'lastfm:scrobble',
 } as const;
+
+export interface ScrobbleInput {
+  artist: string;
+  track: string;
+  album?: string | null;
+  albumArtist?: string | null;
+  durationSec?: number | null;
+  playedAt: number;
+}
+
+export type LastFmPeriod = '7day' | '1month' | '3month' | '6month' | '12month' | 'overall';
+
+export interface LastFmStatus {
+  connected: boolean;
+  username: string | null;
+  scrobbleEnabled: boolean;
+  hasCredentials: boolean;   // apiKey + apiSecret present
+}
+
+export interface LastFmProfile {
+  name: string;
+  realname: string | null;
+  url: string;
+  country: string | null;
+  playcount: number;
+  registered: number | null;
+  image: string | null;
+}
+
+export interface LastFmArtist { name: string; playcount?: number; url: string; image: string | null; listeners?: number; }
+export interface LastFmTrackLite { name: string; artist: string; playcount?: number; listeners?: number; url: string; image: string | null; scrobbledAt?: number | null; nowPlaying?: boolean; album?: string | null; }
+export interface LastFmAlbum { name: string; artist: string; playcount?: number; url: string; image: string | null; }
 
 export interface RadioStation {
   stationuuid: string;

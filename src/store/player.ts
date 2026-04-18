@@ -126,19 +126,60 @@ export const usePlayer = create<PlayerState>((set, get) => {
   let lastTickAt: number | null = null;
   const MIN_RECORD_SEC = 5;
 
-  function startAccounting(trackId: number, durationSec: number | null) {
+  // Track metadata kept alongside the track ID so scrobbling (which wants
+  // artist + title, not a numeric ID) can fire without re-querying the DB.
+  let accountingArtist: string | null = null;
+  let accountingTitle: string | null = null;
+  let accountingAlbum: string | null = null;
+  let accountingStartedAt = 0; // epoch seconds — passed to track.scrobble
+
+  function startAccounting(trackId: number, durationSec: number | null, artist: string | null, title: string, album: string | null) {
     accountingTrackId = trackId;
     accountingDurationSec = durationSec;
     accountedSec = 0;
     lastTickAt = null;
+    accountingArtist = artist;
+    accountingTitle = title;
+    accountingAlbum = album;
+    accountingStartedAt = Math.floor(Date.now() / 1000);
+
+    // Last.fm: mark as "now playing" on the user's profile. Fire-and-forget;
+    // the IPC no-ops when no session key exists or scrobbling is disabled.
+    if (artist) {
+      void window.mp.lastfm.nowPlaying({
+        artist, track: title,
+        album: album ?? null,
+        durationSec: durationSec ?? null,
+      });
+    }
   }
 
   function flushAccounting(completed: boolean) {
     if (accountingTrackId != null && accountedSec >= MIN_RECORD_SEC) {
       void window.mp.stats.recordPlay(accountingTrackId, accountedSec, completed);
     }
+    // Last.fm scrobble rule: submit if listened ≥ 30 sec AND (≥ 4 min OR
+    // ≥ 50% of track duration). If we don't know duration, only the 30-sec
+    // floor applies (Last.fm accepts this for streams with unknown length).
+    if (accountingArtist && accountingTitle && accountedSec >= 30) {
+      const d = accountingDurationSec ?? 0;
+      const halfway = d > 0 && accountedSec >= d * 0.5;
+      const fourMin = accountedSec >= 240;
+      if (d === 0 || halfway || fourMin) {
+        void window.mp.lastfm.scrobble({
+          artist: accountingArtist,
+          track: accountingTitle,
+          album: accountingAlbum,
+          durationSec: d > 0 ? d : null,
+          playedAt: accountingStartedAt,
+        });
+      }
+    }
     accountingTrackId = null;
     accountingDurationSec = null;
+    accountingArtist = null;
+    accountingTitle = null;
+    accountingAlbum = null;
     accountedSec = 0;
     lastTickAt = null;
   }
@@ -163,7 +204,7 @@ export const usePlayer = create<PlayerState>((set, get) => {
     } else {
       set({ duration: 0 });
     }
-    startAccounting(cur.id, cur.durationSec);
+    startAccounting(cur.id, cur.durationSec, cur.artist, cur.title, cur.album);
     try { await engine.play(); }
     catch (err) { console.error('[player] engine.play failed', err); }
   }
@@ -205,7 +246,7 @@ export const usePlayer = create<PlayerState>((set, get) => {
       const cur = s.queue[s.index];
       if (cur) {
         engine.seek(0);
-        startAccounting(cur.id, cur.durationSec);
+        startAccounting(cur.id, cur.durationSec, cur.artist, cur.title, cur.album);
         try { await engine.play(); } catch { /* ignore */ }
       }
       return;
@@ -272,8 +313,14 @@ export const usePlayer = create<PlayerState>((set, get) => {
       // End whatever local-file listening was in progress (flush stats first).
       flushAccounting(accountingDurationSec ? accountedSec / accountingDurationSec > 0.5 : false);
       // Radio can't be scrobbled / counted as a track play — clear accounting.
+      // (Last.fm's scrobble API requires a specific track+artist match with a
+      // user's catalog; ICY stream metadata would need parsing first — out
+      // of scope for the MVP.)
       accountingTrackId = null;
       accountingDurationSec = null;
+      accountingArtist = null;
+      accountingTitle = null;
+      accountingAlbum = null;
       accountedSec = 0;
       lastTickAt = null;
 

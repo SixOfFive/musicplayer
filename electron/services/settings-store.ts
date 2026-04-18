@@ -32,6 +32,14 @@ function defaults(): AppSettings {
       openDevToolsOnStartup: false,
       logRendererToMain: false,
     },
+    lastfm: {
+      apiKey: '',
+      apiSecret: '',
+      sessionKey: '',
+      username: '',
+      scrobbleEnabled: true,
+      minScrobbleSec: 30,
+    },
     library: {
       directories: [],
       databasePath: path.join(userData, 'library.db'),

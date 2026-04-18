@@ -78,6 +78,23 @@ const api = {
   debug: {
     toggleDevTools: () => ipcRenderer.invoke(IPC.DEBUG_TOGGLE_DEVTOOLS),
   },
+  lastfm: {
+    status: () => ipcRenderer.invoke(IPC.LASTFM_STATUS),
+    beginAuth: () => ipcRenderer.invoke(IPC.LASTFM_BEGIN_AUTH),
+    finishAuth: (token: string) => ipcRenderer.invoke(IPC.LASTFM_FINISH_AUTH, token),
+    disconnect: () => ipcRenderer.invoke(IPC.LASTFM_DISCONNECT),
+    setKeys: (apiKey: string, apiSecret: string) => ipcRenderer.invoke(IPC.LASTFM_SET_KEYS, apiKey, apiSecret),
+    setScrobble: (enabled: boolean) => ipcRenderer.invoke(IPC.LASTFM_SET_SCROBBLE, enabled),
+    profile: () => ipcRenderer.invoke(IPC.LASTFM_PROFILE),
+    userTopArtists: (period: string, limit?: number) => ipcRenderer.invoke(IPC.LASTFM_USER_TOP_ARTISTS, period, limit),
+    userTopTracks: (period: string, limit?: number) => ipcRenderer.invoke(IPC.LASTFM_USER_TOP_TRACKS, period, limit),
+    userTopAlbums: (period: string, limit?: number) => ipcRenderer.invoke(IPC.LASTFM_USER_TOP_ALBUMS, period, limit),
+    userRecent: (limit?: number) => ipcRenderer.invoke(IPC.LASTFM_USER_RECENT, limit),
+    chartsArtists: (limit?: number) => ipcRenderer.invoke(IPC.LASTFM_CHARTS_ARTISTS, limit),
+    chartsTracks: (limit?: number) => ipcRenderer.invoke(IPC.LASTFM_CHARTS_TRACKS, limit),
+    nowPlaying: (input: unknown) => ipcRenderer.invoke(IPC.LASTFM_NOW_PLAYING, input),
+    scrobble: (input: unknown) => ipcRenderer.invoke(IPC.LASTFM_SCROBBLE, input),
+  },
   radio: {
     top: (limit?: number) => ipcRenderer.invoke(IPC.RADIO_TOP, limit),
     trending: (limit?: number) => ipcRenderer.invoke(IPC.RADIO_TRENDING, limit),
