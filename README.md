@@ -24,9 +24,29 @@ The installer bundles everything: the app, Electron runtime, SQLite, FFmpeg for 
 
 ### Updating a packaged install
 
-Download the new installer from the Releases page and run it — it upgrades in place. Your library database, settings, and liked songs all carry over (they live in your user data dir, which the installer never touches).
+**Automatic.** When a newer release is on GitHub, the installer version of the app detects it on startup and downloads the new installer in the background. You'll see a blue progress bar in the banner at the top; when it finishes it flips green ("Update ready — restart to install") and one click applies the update + relaunches. Your library, settings, and liked songs are preserved.
 
-In-app "Update now" is only for people running from source (see below) — for installed builds it'll open the Releases page instead.
+If auto-update can't reach GitHub (offline / firewall / corporate proxy), just download the new `.exe` from the Releases page and run it manually — it upgrades in place.
+
+---
+
+## Cutting a new release (maintainer notes)
+
+Version tag and `package.json.version` must match exactly, or CI aborts with a clear error. To keep them in sync automatically, use:
+
+```bash
+npm run release:patch    # 0.1.0 → 0.1.1
+npm run release:minor    # 0.1.0 → 0.2.0
+npm run release:major    # 0.1.0 → 1.0.0
+```
+
+Each script runs `npm version <level>`, which:
+1. Bumps `package.json` + `package-lock.json`
+2. Creates a git commit `Release v0.X.Y`
+3. Tags that commit `v0.X.Y`
+4. Pushes the commit + tag
+
+The tag push triggers the `build` workflow with `--publish always`, which creates a GitHub Release and uploads the Windows `.exe`, macOS `.dmg`, Linux `.deb`/`.rpm`/`.tar.gz`, plus the `latest.yml` metadata files `electron-updater` reads. A few minutes later, every installed user gets the blue banner.
 
 ---
 

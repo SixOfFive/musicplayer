@@ -13,7 +13,10 @@
     "electron:build": "npm run build && electron-builder",
     "lint": "eslint . --ext .ts,.tsx",
     "rebuild": "electron-builder install-app-deps",
-    "postinstall": "electron-builder install-app-deps"
+    "postinstall": "electron-builder install-app-deps",
+    "release:patch": "npm version patch -m \"Release v%s\" && git push && git push --tags",
+    "release:minor": "npm version minor -m \"Release v%s\" && git push && git push --tags",
+    "release:major": "npm version major -m \"Release v%s\" && git push && git push --tags"
   },
   "dependencies": {
     "better-sqlite3": "^12.2.0",
