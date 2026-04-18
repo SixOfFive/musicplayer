@@ -2,9 +2,37 @@
 
 A personal, local-first music player with a Spotify-style interface — Electron + React + TypeScript desktop app for Windows, macOS and Linux (including KDE Plasma).
 
-## Installing on Windows — step by step
+## Easiest: download the installer
 
-This is a walkthrough for anyone who's never touched Node.js or a terminal before. Follow it top to bottom and you'll have a working install.
+No Node.js, Git, or terminal needed — just download and run.
+
+1. Go to **https://github.com/SixOfFive/musicplayer/releases/latest**
+2. Grab the installer for your OS:
+   - **Windows** — `MusicPlayer-Setup-X.Y.Z.exe`
+   - **macOS** — `MusicPlayer-X.Y.Z.dmg` *(not code-signed yet — see note below)*
+   - **Linux** — `MusicPlayer-X.Y.Z.AppImage`
+3. **Windows:** double-click the `.exe`, pick an install folder, done. **macOS:** mount the `.dmg`, drag to Applications. **Linux:** `chmod +x MusicPlayer-*.AppImage` and run it.
+4. Launch from your Start Menu / Launchpad / application menu.
+
+The installer bundles everything: the app, Electron runtime, SQLite, FFmpeg for FLAC→MP3 conversion, butterchurn visualizer with 100 Milkdrop presets, all metadata providers. It's about **~170 MB** on disk after install.
+
+**First launch Windows warnings (one-time):**
+- **SmartScreen** ("Windows protected your PC") → **More info** → **Run anyway**. The installer isn't code-signed yet (costs ~$200/year for a cert).
+- **Antivirus** may quarantine the bundled `ffmpeg.exe`. Whitelist that file if it does.
+
+**macOS note:** without a Developer ID cert, Gatekeeper will block the DMG on first open. Control-click the `.app` → **Open** → **Open**. Only needed once.
+
+### Updating a packaged install
+
+Download the new installer from the Releases page and run it — it upgrades in place. Your library database, settings, and liked songs all carry over (they live in your user data dir, which the installer never touches).
+
+In-app "Update now" is only for people running from source (see below) — for installed builds it'll open the Releases page instead.
+
+---
+
+## Installing on Windows from source — step by step
+
+Use this path if you want the latest `main` branch, plan to hack on the code, or want in-app `git pull`-style updates. This walkthrough assumes no prior terminal experience.
 
 ### What you need before you start
 

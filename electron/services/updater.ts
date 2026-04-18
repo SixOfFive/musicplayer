@@ -8,12 +8,18 @@ import { getSettings } from './settings-store';
 
 const exec = promisify(execFile);
 
+/**
+ * True when the app was packaged by electron-builder (installer/.exe build).
+ * In this mode there's no `.git` directory, `npm` isn't on the end-user's
+ * PATH, and updates happen by downloading a new installer from GitHub
+ * Releases — NOT by git pull.
+ */
+function isPackaged(): boolean { return app.isPackaged; }
+
 // Where this Electron process was started from — doubles as the project root
 // in dev mode. In packaged builds the git repo isn't shipped, so updates via
 // git pull just aren't applicable.
 function projectRoot(): string {
-  // app.getAppPath() returns the directory of package.json in dev; for packaged
-  // builds it's inside app.asar (no git). Either way, that's where we operate.
   return app.getAppPath();
 }
 
@@ -132,8 +138,17 @@ export interface ApplyUpdateResult {
  *
  * npm install is NOT run here — that's handled by run.bat / run.sh on the
  * next launch via the package.json mtime check.
+ *
+ * In packaged builds this function refuses to run — the user needs to
+ * download a new installer from GitHub Releases instead.
  */
 export async function applyUpdate(): Promise<ApplyUpdateResult> {
+  if (isPackaged()) {
+    return {
+      ok: false, needsRestart: false, newSha: null, pulledCommits: 0,
+      message: 'In installed builds, updates require downloading a new installer from the Releases page.',
+    };
+  }
   const settings = getSettings();
   const { branch } = settings.update;
   const dirty = await isDirty();
@@ -172,10 +187,11 @@ export async function applyUpdate(): Promise<ApplyUpdateResult> {
   };
 }
 
-export async function getUpdateInfo(): Promise<{ version: string; sha: string | null; dirty: boolean }> {
+export async function getUpdateInfo(): Promise<{ version: string; sha: string | null; dirty: boolean; packaged: boolean }> {
   return {
     version: await readPkgVersion(),
     sha: await readLocalSha(),
     dirty: await isDirty(),
+    packaged: isPackaged(),
   };
 }

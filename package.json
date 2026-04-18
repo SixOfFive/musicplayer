@@ -46,9 +46,22 @@
   "build": {
     "appId": "com.sixoffive.musicplayer",
     "productName": "MusicPlayer",
+    "directories": {
+      "output": "release"
+    },
     "files": [
       "dist/**/*",
-      "dist-electron/**/*"
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "extraMetadata": {
+      "main": "dist-electron/electron/main.js"
+    },
+    "asarUnpack": [
+      "**/node_modules/ffmpeg-static/ffmpeg*",
+      "**/node_modules/better-sqlite3/**/*",
+      "**/node_modules/bindings/**/*",
+      "**/node_modules/butterchurn-presets/**/*"
     ],
     "mac": {
       "category": "public.app-category.music",
@@ -59,7 +72,15 @@
       "target": [ "AppImage", "deb", "rpm" ]
     },
     "win": {
-      "target": [ "nsis" ]
+      "target": [ { "target": "nsis", "arch": [ "x64" ] } ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "MusicPlayer"
     }
   }
 }
