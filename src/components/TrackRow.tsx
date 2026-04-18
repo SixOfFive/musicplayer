@@ -77,9 +77,9 @@ export default function TrackRow({
   return (
     <>
       <div
-        onDoubleClick={playHere}
+        onClick={playHere}
         onContextMenu={(e) => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY }); }}
-        className="grid grid-cols-[24px_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_72px_40px] gap-3 items-center px-4 py-2 text-sm rounded hover:bg-white/5 cursor-default"
+        className="grid grid-cols-[24px_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_72px_40px] gap-3 items-center px-4 py-2 text-sm rounded hover:bg-white/5 cursor-pointer select-none"
       >
         <div className="text-text-muted text-right">{index + 1}</div>
         <div className="min-w-0 flex items-center gap-3">
@@ -95,7 +95,7 @@ export default function TrackRow({
         <div className="min-w-0 truncate text-text-muted">{track.artist ?? ''}</div>
         <div className="text-text-secondary text-right tabular-nums">{fmt(track.duration_sec)}</div>
         <button
-          onClick={() => toggleLike(track.id)}
+          onClick={(e) => { e.stopPropagation(); toggleLike(track.id); }}
           className={`text-lg ${liked ? 'text-accent' : 'text-text-muted hover:text-text-primary'}`}
           title={liked ? 'Unlike' : 'Like'}
         >{liked ? '♥' : '♡'}</button>
