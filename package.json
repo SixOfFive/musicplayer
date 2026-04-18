@@ -69,7 +69,7 @@
     },
     "linux": {
       "category": "AudioVideo;Audio;Player;",
-      "target": [ "AppImage", "deb", "rpm" ]
+      "target": [ "deb", "rpm", "tar.gz" ]
     },
     "win": {
       "target": [ { "target": "nsis", "arch": [ "x64" ] } ]
