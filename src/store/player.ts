@@ -245,17 +245,22 @@ export const usePlayer = create<PlayerState>((set, get) => {
   engine.element.addEventListener('durationchange', applyElementDuration);
   engine.element.addEventListener('ended', async () => {
     const s = get();
+    console.log(`[player] 'ended' event fired | repeatMode=${s.repeatMode} | element.loop=${engine.element.loop} | queueIdx=${s.index}/${s.queue.length}`);
     // Final accounting for the just-completed track.
     if (accountingDurationSec) accountedSec = Math.max(accountedSec, accountingDurationSec);
     flushAccounting(true);
 
-    // Repeat-one: restart the same track.
+    // Repeat-one fallback: if native `loop` somehow didn't take effect
+    // (HMR glitch, attribute got cleared, etc.), we still get here and can
+    // restart manually.
     if (s.repeatMode === 'one') {
       const cur = s.queue[s.index];
       if (cur) {
+        console.log(`[player] repeat-one fallback restart | title="${cur.title}"`);
         engine.seek(0);
         startAccounting(cur.id, cur.durationSec, cur.artist, cur.title, cur.album);
-        try { await engine.play(); } catch { /* ignore */ }
+        try { await engine.play(); }
+        catch (err: any) { console.error(`[player] repeat-one restart FAILED | ${err?.name}: ${err?.message}`); }
       }
       return;
     }
@@ -420,6 +425,7 @@ export const usePlayer = create<PlayerState>((set, get) => {
       // fails to re-trigger on some codecs). For 'off' / 'all', leave loop
       // disabled so the 'ended' handler can advance the queue.
       engine.element.loop = (m === 'one');
+      console.log(`[player] setRepeatMode(${m}) | element.loop=${engine.element.loop}`);
       set({ repeatMode: m });
     },
     cycleRepeat() {
@@ -427,6 +433,7 @@ export const usePlayer = create<PlayerState>((set, get) => {
       const s = get();
       const next = order[(order.indexOf(s.repeatMode) + 1) % order.length];
       engine.element.loop = (next === 'one');
+      console.log(`[player] cycleRepeat ${s.repeatMode} → ${next} | element.loop=${engine.element.loop}`);
       set({ repeatMode: next });
     },
 

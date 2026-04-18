@@ -1,6 +1,9 @@
 import { app, BrowserWindow, ipcMain, dialog, protocol, net, session } from 'electron';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { createReadStream } from 'node:fs';
+import fs from 'node:fs/promises';
+import { Readable } from 'node:stream';
 import { registerSettingsIpc } from './ipc/settings';
 import { registerLibraryIpc } from './ipc/library';
 import { registerScanIpc, setProgressWindow, resumeArtFetchOnStartup } from './ipc/scan';
@@ -87,12 +90,39 @@ function createWindow() {
   });
 }
 
-// Register a custom protocol so we can serve music files + cover art to the
-// renderer without exposing raw filesystem paths to the web context.
-//
-// We use Electron's `net.fetch` here (NOT Node's global fetch): Electron's
-// implementation has first-class support for file:// URLs, including HTTP
-// Range requests — required for <audio> scrubbing/seeking on large files.
+// Content-type lookup for the file extensions we serve. Browsers match on
+// `audio/*` / `image/*` to pick a decoder; mismatched MIME can silently
+// disable playback or cause Range requests to be skipped.
+const MIME_BY_EXT: Record<string, string> = {
+  '.mp3': 'audio/mpeg',
+  '.flac': 'audio/flac',
+  '.wav': 'audio/wav',
+  '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac',
+  '.ogg': 'audio/ogg',
+  '.opus': 'audio/ogg',
+  '.wma': 'audio/x-ms-wma',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+};
+
+/**
+ * Register a custom protocol so we can serve music files + cover art to the
+ * renderer without exposing raw filesystem paths to the web context.
+ *
+ * We implement HTTP Range semantics ourselves (reading the requested byte
+ * slice off disk as a stream). Electron's `net.fetch` on `file://` URLs
+ * does NOT honor `Range` — it always returns 200 with the full body — which
+ * silently breaks seeking and progressive loading for large lossless files:
+ * `HTMLMediaElement` sees 200-for-a-Range-request, tries to decode from the
+ * wrong offset, and aborts with DEMUXER_ERROR_COULD_NOT_PARSE / "PTS is not
+ * defined". For 24-bit FLACs specifically the first progressive chunk
+ * request (bytes=65536-) hits this path and playback dies before the user
+ * hears anything.
+ */
 function registerMediaProtocol() {
   protocol.handle('mp-media', async (req) => {
     try {
@@ -106,14 +136,76 @@ function registerMediaProtocol() {
       // Decode per-segment so `%` literals in filenames aren't double-decoded.
       const segments = url.pathname.replace(/^\//, '').split('/').map(decodeURIComponent);
       const filePath = segments.join(path.sep);
-      const fileUrl = pathToFileURL(filePath).toString();
-      process.stdout.write(`[mp-media] req=${req.url}\n            file=${filePath}\n            range=${req.headers.get('range') ?? 'none'}\n`);
-      const resp = await net.fetch(fileUrl);
-      process.stdout.write(`[mp-media] → status=${resp.status} type=${resp.headers.get('content-type')}\n`);
-      return resp;
+      const rangeHeader = req.headers.get('range');
+      process.stdout.write(`[mp-media] req=${req.url}\n            file=${filePath}\n            range=${rangeHeader ?? 'none'}\n`);
+
+      const stat = await fs.stat(filePath);
+      const size = stat.size;
+      const ext = path.extname(filePath).toLowerCase();
+      const contentType = MIME_BY_EXT[ext] ?? 'application/octet-stream';
+
+      // Parse `Range: bytes=<start>-<end>` (either end may be missing):
+      //   bytes=0-         → start=0, end=size-1   (Chromium probes this first)
+      //   bytes=65536-     → start=65536, end=size-1
+      //   bytes=100-200    → start=100, end=200
+      //   bytes=-500       → suffix; last 500 bytes of file
+      let start = 0;
+      let end = size - 1;
+      let isPartial = false;
+      if (rangeHeader) {
+        const m = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader.trim());
+        if (m) {
+          const s = m[1];
+          const e = m[2];
+          if (s === '' && e !== '') {
+            // Suffix form: "bytes=-500" → the last 500 bytes.
+            const suffix = Math.min(size, parseInt(e, 10));
+            start = size - suffix;
+            end = size - 1;
+          } else {
+            start = s === '' ? 0 : parseInt(s, 10);
+            end = e === '' ? size - 1 : Math.min(parseInt(e, 10), size - 1);
+          }
+          // Only mark partial when the range is a real sub-slice. Some
+          // browsers send `bytes=0-` as a probe for Range support; returning
+          // 206 for that is also fine and more informative (tells the
+          // browser the server understands ranges), but classical 200 also
+          // works. We return 206 when the client explicitly asked for Range.
+          isPartial = true;
+          // Validate.
+          if (start < 0 || end < start || end >= size) {
+            process.stdout.write(`[mp-media] → 416 Range Not Satisfiable (${start}-${end} of ${size})\n`);
+            return new Response('Range Not Satisfiable', {
+              status: 416,
+              headers: { 'Content-Range': `bytes */${size}` },
+            });
+          }
+        }
+      }
+
+      const length = end - start + 1;
+      // createReadStream's `end` is INCLUSIVE (same as Content-Range), so
+      // no off-by-one correction needed here.
+      const nodeStream = createReadStream(filePath, { start, end });
+      const webStream = Readable.toWeb(nodeStream) as unknown as ReadableStream;
+
+      const headers = new Headers({
+        'Content-Type': contentType,
+        'Content-Length': String(length),
+        'Accept-Ranges': 'bytes',
+        // No-cache on seeks so the browser always asks us for fresh ranges
+        // rather than stitching from a stale cached response.
+        'Cache-Control': 'no-cache',
+      });
+      if (isPartial) headers.set('Content-Range', `bytes ${start}-${end}/${size}`);
+
+      const status = isPartial ? 206 : 200;
+      process.stdout.write(`[mp-media] → status=${status} type=${contentType} length=${length}${isPartial ? ` range=${start}-${end}/${size}` : ''}\n`);
+      return new Response(webStream, { status, headers });
     } catch (err: any) {
       console.error('[mp-media] error', err?.message ?? err);
-      return new Response('Not found', { status: 404 });
+      const code = err?.code === 'ENOENT' ? 404 : 500;
+      return new Response(err?.message ?? 'Error', { status: code });
     }
   });
 }
