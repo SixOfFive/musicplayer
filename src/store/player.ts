@@ -250,18 +250,16 @@ export const usePlayer = create<PlayerState>((set, get) => {
     if (accountingDurationSec) accountedSec = Math.max(accountedSec, accountingDurationSec);
     flushAccounting(true);
 
-    // Repeat-one fallback: if native `loop` somehow didn't take effect
-    // (HMR glitch, attribute got cleared, etc.), we still get here and can
-    // restart manually.
+    // Repeat-one is handled by `element.loop = true` (set by setRepeatMode /
+    // cycleRepeat / loadAndPlay). When loop is true, Chromium seeks to 0 +
+    // continues playing AND does not fire `ended`, so this handler shouldn't
+    // even reach here for repeat-one. If it does (stale HMR state, browser
+    // quirk), just no-op — do NOT call engine.play() again, because that can
+    // race with an in-flight play() invoked elsewhere and throw AbortError,
+    // which leaves the element stuck in a state where subsequent play/pause
+    // calls silently fail and the position counter freezes.
     if (s.repeatMode === 'one') {
-      const cur = s.queue[s.index];
-      if (cur) {
-        console.log(`[player] repeat-one fallback restart | title="${cur.title}"`);
-        engine.seek(0);
-        startAccounting(cur.id, cur.durationSec, cur.artist, cur.title, cur.album);
-        try { await engine.play(); }
-        catch (err: any) { console.error(`[player] repeat-one restart FAILED | ${err?.name}: ${err?.message}`); }
-      }
+      console.log('[player] repeat-one: ended fired unexpectedly — relying on native loop, no manual restart');
       return;
     }
 
