@@ -42,6 +42,14 @@ export default function RadioView() {
       else if (mode === 'search' && query.trim()) list = await window.mp.radio.search(query.trim(), 100);
       else if (mode === 'tag' && tag) list = await window.mp.radio.byTag(tag, 100);
       else if (mode === 'country' && country) list = await window.mp.radio.byCountry(country, 100);
+      // Always present stations A→Z regardless of mode. Radio-Browser returns
+      // them in vote/click order; the user asked for alphabetical so the list
+      // is predictable and scannable. `localeCompare` with numeric + base
+      // sensitivity handles accents + station names that start with numbers
+      // (e.g. "1.FM" before "ABC Radio").
+      list = [...list].sort((a, b) =>
+        (a.name || '').localeCompare(b.name || '', undefined, { sensitivity: 'base', numeric: true })
+      );
       setStations(list);
     } catch (e: any) {
       setErr(e?.message ?? 'Failed to load stations');
