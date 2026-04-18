@@ -11,3 +11,8 @@ out
 .env.local
 # electron-builder cache
 .eb-cache
+# TypeScript incremental build info
+*.tsbuildinfo
+# vite.config compiled output (we commit the .ts only)
+vite.config.d.ts
+vite.config.js
