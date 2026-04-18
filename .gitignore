@@ -16,3 +16,6 @@ out
 # vite.config compiled output (we commit the .ts only)
 vite.config.d.ts
 vite.config.js
+# Assistant scratch files — never publish. Contains local creds + notes.
+BRAINDUMP.md
+brainstart.md

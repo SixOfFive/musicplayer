@@ -205,12 +205,15 @@ npm run electron:build      # produces platform installer via electron-builder
 - **Live refresh** — Albums/Home/Library/Artist views re-fetch as covers land, without polling
 
 ### Playback
-- Double-click a track → plays with the visible list as queue
+- **Single-click** any track row to play it (right-click for context menu: like / add to playlist / delete / etc.)
 - Hover an album card → Spotify-style green ▶ play button
-- Album detail page: big cover, title/artist/year/genre/runtime, big Play button, full track list
+- Album detail page: big cover, title/artist/year/genre/runtime, big Play button, full track list, Shrink button if applicable, mini visualizer in the upper-right
 - Artist detail page: every album of theirs + every track, Play All button
-- Scrubber with seek support (HTTP Range requests through custom `mp-media` protocol via Electron's `net.fetch`)
-- Volume, prev/next, heart-to-like, now-playing bar persistent across views
+- **Shuffle** (one-time Fisher-Yates randomization, keeps current track at head) + **Repeat all** (🔁 with ∞ badge) + **Repeat one** (🔁 with 1 badge) in the Now Playing bar
+- Scrubber with real seek support (HTTP Range requests through custom `mp-media` protocol via Electron's `net.fetch`)
+- **10-band graphic equalizer** in a collapsible sidebar panel: ISO third-octave bands 31 Hz–16 kHz ±12 dB, preamp, 10 presets (Flat / Bass / Treble / Rock / Classical / Electronic / Vocal / Podcast / Loudness / Bass+Treble). Persists across sessions. Real Web Audio `BiquadFilterNode` chain.
+- Volume persists across sessions
+- Back/Forward buttons in TopBar track a proper history stack; scroll position restored per page so Back returns you to exactly where you left off
 
 ### Playlists (universal .m3u8 format)
 - **Left-sidebar "Playlists" tab** → dedicated grid view with Export-all / Import-from-folder buttons
@@ -242,21 +245,39 @@ npm run electron:build      # produces platform installer via electron-builder
     - Biggest single listening day, first track ever played
   - Recently-added strip + Your albums grid
 
+### Internet radio (separate tab, no account)
+- Left-sidebar **Radio** tab queries the community-maintained [Radio-Browser](https://www.radio-browser.info/) directory — ~40,000 live Icecast/Shoutcast/HLS streams worldwide, no key, no account
+- Five modes: Top voted / Trending / Search / By genre (popular tags as chips) / By country (ISO-3166 codes)
+- Click any station → immediate playback. NowPlayingBar swaps into radio mode: station name, country, codec, bitrate, LIVE badge, just a Play/Pause button
+- Station favicons shown with graceful fallback to a 📻 glyph
+
+### Last.fm (separate tab, requires free API key)
+- Left-sidebar **Last.fm** tab — scrobble local plays to your Last.fm profile, browse your listening history and global charts
+- Setup: register a personal Last.fm app at [last.fm/api/account/create](https://www.last.fm/api/account/create) (free), paste API key + shared secret into the app, authorize in your browser. Session key is long-lived.
+- **Scrobbling** fires on every local file play: `track.updateNowPlaying` at start, `track.scrobble` on completion per Last.fm's rule (≥30 sec AND (≥4 min OR ≥50% of duration)). Runs alongside local stats, never replaces them.
+- Tabs within: Top artists / Top tracks / Top albums (with time-period selector — 7 days through all-time) · Recently scrobbled (auto-refreshes every 30 s, shows "Now playing" badge) · Global charts (public, works even before connecting)
+- Mini visualizer in the header. Scrobbling can be toggled on/off without disconnecting.
+
 ### Visualizer
 - **Pluggable backend API** — every backend consumes an `AudioFrame` bus with FFT bins, waveform, bass/mid/treble energies, beat flag + intensity, running BPM
 - **5 built-in visualizers** (Canvas2D, zero deps): Spectrum Bars, Mirror Bars, Oscilloscope, Radial Spectrum, Beat Particles
-- **20 bundled Milkdrop presets** via `butterchurn` (WebGL port of Milkdrop 2) — classic Geiss, Flexi, Aderrasi, Rovastar, etc.
+- **100 bundled Milkdrop presets** via `butterchurn` (WebGL port of Milkdrop 2) — real presets from `butterchurn-presets` enumerated at runtime
+- **Mini visualizer** embedded in Playlist, Album, and Last.fm page headers — clickable to expand to full view
 - **User plugins**: drop `.milk` files into any folder listed in Settings → Visualizer → Plugin folders
 - **Winamp `.dll` plugins**: listed but marked unloadable. A Windows-only FFI bridge (`node-ffi-napi`) is scaffolded under the `native-winamp` backend kind — not implemented.
 
 ### FLAC → MP3 conversion ("Shrink albums")
-- **Button on AlbumView** for any album with FLAC tracks ≥ 20 MB
-- **Yellow 🗜 badge on album cards** when the album is above the 66th-percentile size in your library (configurable percentile slider in Settings)
+- **Button on AlbumView** for any album with FLAC tracks, showing projected savings (e.g. "~427 MB · 58% of album") so you can decide before clicking
+- **Yellow 🗜 badge on album cards** when converting FLAC→MP3 V0 would save at least 5% of the album's size (configurable 0–50% in Settings)
 - Uses bundled **ffmpeg** (via `ffmpeg-static`) with `libmp3lame`
 - Quality options: **VBR V0** (~245 kbps, archival — default), V2 (~190), CBR 320, CBR 256
 - Preserves all tags (`-map_metadata 0`) and embedded cover art (`-map 0:v? -c:v copy`)
 - **Safety**: refuses to overwrite existing MP3s, verifies every output is present and >= 30 KB, and only removes FLACs after *all* new MP3s verify. Originals go to the system trash by default (toggle-able)
 - Progress bar, cancellation, and DB path/codec/size updates in a single transaction at the end
+
+### Auto-update
+- **Installer builds** (downloaded `.exe`/`.dmg`/`.deb`/`.rpm`): `electron-updater` checks GitHub Releases on startup + every 30 min. When a new version lands, a blue banner shows live download progress, then flips green ("Restart to install") — one click applies. Library DB + settings + playlists all survive.
+- **Source installs** (`git clone` + `run.bat`/`run.sh`): yellow banner when main has new commits. Click "Update now" → `git pull --ff-only`. `package.json` change triggers auto-`npm install` on next launch.
 
 ### Settings (five tabs)
 - **Library** — folders, scan progress, database/cache paths, cover art storage (app cache *or* alongside audio files as `cover.jpg` / `folder.jpg`), playlist export folder + path style, destructive-ops gate
