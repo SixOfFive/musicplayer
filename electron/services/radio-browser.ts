@@ -4,13 +4,91 @@
 // No API key required. Aggregated from community contributions; stations
 // carry metadata + a direct stream URL.
 //
-// The service publishes a set of round-robin mirror hostnames under
-//   https://all.api.radio-browser.info/
-// We resolve one on first use via a SRV-style lookup and cache it per
-// process, with a hard fallback on the known primary host.
+// Results are cached on disk with a 24-hour TTL so repeated browsing of
+// the Radio tab doesn't hammer the community servers. Cache file lives
+// in the Electron userData dir and survives restarts.
+
+import { app } from 'electron';
+import path from 'node:path';
+import fs from 'node:fs/promises';
 
 const USER_AGENT = 'MusicPlayer/0.1 (personal; +https://github.com/SixOfFive/musicplayer)';
 const FALLBACK_HOST = 'de1.api.radio-browser.info';
+
+// ---- Persistent 24h TTL cache ---------------------------------------------
+// Cache key is the fully-qualified URL (mirror host + path + query). Mirror
+// may differ across sessions but the query identifies the result set, so we
+// normalise by stripping the host and keying on path+query only.
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const CACHE_MAX_ENTRIES = 200;
+interface CacheEntry { fetchedAt: number; data: any }
+let cacheMap: Map<string, CacheEntry> | null = null;
+let cachePath = '';
+let saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+async function loadCache(): Promise<Map<string, CacheEntry>> {
+  if (cacheMap) return cacheMap;
+  try { cachePath = path.join(app.getPath('userData'), 'radio-cache.json'); }
+  catch { cachePath = ''; }
+  cacheMap = new Map();
+  if (!cachePath) return cacheMap;
+  try {
+    const raw = await fs.readFile(cachePath, 'utf8');
+    const obj = JSON.parse(raw) as Record<string, CacheEntry>;
+    for (const [k, v] of Object.entries(obj)) {
+      // Drop already-expired entries at load time so the file doesn't bloat.
+      if (v && typeof v.fetchedAt === 'number' && Date.now() - v.fetchedAt < CACHE_TTL_MS) {
+        cacheMap.set(k, v);
+      }
+    }
+  } catch { /* file missing or corrupt — start empty */ }
+  return cacheMap;
+}
+
+/**
+ * Debounced cache write — burst of queries when the user opens the Radio
+ * tab would otherwise cause a writeFile per call.
+ */
+function scheduleSave() {
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(async () => {
+    saveTimer = null;
+    if (!cacheMap || !cachePath) return;
+    try {
+      const obj: Record<string, CacheEntry> = {};
+      for (const [k, v] of cacheMap) obj[k] = v;
+      await fs.writeFile(cachePath, JSON.stringify(obj), 'utf8');
+    } catch { /* best-effort */ }
+  }, 2000);
+}
+
+/** Evict oldest entries when over cap. */
+function enforceCap() {
+  if (!cacheMap || cacheMap.size <= CACHE_MAX_ENTRIES) return;
+  const entries = [...cacheMap.entries()].sort((a, b) => a[1].fetchedAt - b[1].fetchedAt);
+  const drop = entries.slice(0, cacheMap.size - CACHE_MAX_ENTRIES);
+  for (const [k] of drop) cacheMap.delete(k);
+}
+
+/**
+ * Fetch JSON with the 24h cache. `cacheKey` is the path+query portion of the
+ * URL so that picks of different mirrors across sessions still share cache
+ * entries. `fetchUrl` is the full URL including mirror host.
+ */
+async function cachedFetch(cacheKey: string, fetchUrl: string): Promise<any> {
+  const cache = await loadCache();
+  const hit = cache.get(cacheKey);
+  if (hit && Date.now() - hit.fetchedAt < CACHE_TTL_MS) return hit.data;
+  const r = await fetch(fetchUrl, {
+    headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' },
+  });
+  if (!r.ok) throw new Error(`Radio-Browser HTTP ${r.status}`);
+  const json = await r.json();
+  cache.set(cacheKey, { fetchedAt: Date.now(), data: json });
+  enforceCap();
+  scheduleSave();
+  return json;
+}
 
 let resolvedBase: string | null = null;
 
@@ -57,12 +135,7 @@ export interface RadioStation {
 
 async function call(pathAndQuery: string): Promise<RadioStation[]> {
   const b = await base();
-  const url = `${b}${pathAndQuery}`;
-  const r = await fetch(url, {
-    headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' },
-  });
-  if (!r.ok) throw new Error(`Radio-Browser HTTP ${r.status}`);
-  const json: any = await r.json();
+  const json = await cachedFetch(pathAndQuery, `${b}${pathAndQuery}`);
   return Array.isArray(json) ? json : [];
 }
 
@@ -101,11 +174,8 @@ export interface RadioTag { name: string; stationcount: number; }
 /** Popular genre tags, ordered by station count. */
 export async function popularTags(limit = 100): Promise<RadioTag[]> {
   const b = await base();
-  const r = await fetch(`${b}/json/tags?order=stationcount&reverse=true&limit=${limit}`, {
-    headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' },
-  });
-  if (!r.ok) throw new Error(`Radio-Browser HTTP ${r.status}`);
-  const json: any = await r.json();
+  const key = `/json/tags?order=stationcount&reverse=true&limit=${limit}`;
+  const json = await cachedFetch(key, `${b}${key}`);
   return Array.isArray(json) ? json.map((t: any) => ({ name: t.name, stationcount: Number(t.stationcount) || 0 })) : [];
 }
 

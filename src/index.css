@@ -21,3 +21,14 @@ body {
 /* Make the drag region at top of frameless window possible */
 .titlebar-drag { -webkit-app-region: drag; }
 .titlebar-nodrag { -webkit-app-region: no-drag; }
+
+/* Indeterminate progress bar used by <LoadingStrip> — 30%-wide slider
+   loops across the track so the user knows something's happening without
+   any actual completion data. */
+@keyframes loading-indeterminate {
+  0%   { left: -30%; }
+  100% { left: 100%; }
+}
+.loading-indeterminate {
+  animation: loading-indeterminate 1.2s ease-in-out infinite;
+}

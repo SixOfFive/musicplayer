@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { RadioStation, RadioTag } from '../../shared/types';
 import { usePlayer } from '../store/player';
+import LoadingStrip from '../components/LoadingStrip';
 
 type Mode = 'popular' | 'trending' | 'search' | 'tag' | 'country';
 
@@ -136,7 +137,7 @@ export default function RadioView() {
       )}
 
       {/* Status */}
-      {loading && <div className="text-sm text-text-muted">Loading stations…</div>}
+      {loading && <LoadingStrip label="Loading stations…" className="my-3" />}
       {err && <div className="text-sm text-red-400">Error: {err}</div>}
       {!loading && !err && stations.length === 0 && mode !== 'search' && (
         <div className="text-sm text-text-muted">

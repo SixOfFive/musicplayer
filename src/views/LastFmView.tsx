@@ -3,6 +3,7 @@ import type {
   LastFmAlbum, LastFmArtist, LastFmPeriod, LastFmProfile, LastFmStatus, LastFmTrackLite,
 } from '../../shared/types';
 import MiniVisualizer from '../components/MiniVisualizer';
+import LoadingStrip from '../components/LoadingStrip';
 
 type Tab = 'topArtists' | 'topTracks' | 'topAlbums' | 'recent' | 'charts';
 
@@ -41,7 +42,7 @@ export default function LastFmView() {
 
   useEffect(() => { refreshStatus(); }, [refreshStatus]);
 
-  if (!status) return <section className="p-8 text-text-muted">Loading Last.fm…</section>;
+  if (!status) return <section className="p-8"><LoadingStrip label="Loading Last.fm status…" /></section>;
 
   return (
     <section>
@@ -272,7 +273,7 @@ function TabButton({ active, onClick, children }: { active: boolean; onClick: ()
 function TopArtists({ period }: { period: LastFmPeriod }) {
   const [items, setItems] = useState<LastFmArtist[] | null>(null);
   useEffect(() => { setItems(null); window.mp.lastfm.userTopArtists(period, 50).then((a) => setItems(a as LastFmArtist[])); }, [period]);
-  if (!items) return <div className="text-text-muted text-sm">Loading…</div>;
+  if (!items) return <LoadingStrip label="Loading from Last.fm…" className="py-3" />;
   if (items.length === 0) return <div className="text-text-muted text-sm">No artists for this period yet.</div>;
   return (
     <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-3">
@@ -290,7 +291,7 @@ function TopArtists({ period }: { period: LastFmPeriod }) {
 function TopTracks({ period }: { period: LastFmPeriod }) {
   const [items, setItems] = useState<LastFmTrackLite[] | null>(null);
   useEffect(() => { setItems(null); window.mp.lastfm.userTopTracks(period, 50).then((a) => setItems(a as LastFmTrackLite[])); }, [period]);
-  if (!items) return <div className="text-text-muted text-sm">Loading…</div>;
+  if (!items) return <LoadingStrip label="Loading from Last.fm…" className="py-3" />;
   if (items.length === 0) return <div className="text-text-muted text-sm">No tracks for this period yet.</div>;
   return (
     <ol className="bg-bg-elev-1/40 rounded divide-y divide-white/5">
@@ -312,7 +313,7 @@ function TopTracks({ period }: { period: LastFmPeriod }) {
 function TopAlbums({ period }: { period: LastFmPeriod }) {
   const [items, setItems] = useState<LastFmAlbum[] | null>(null);
   useEffect(() => { setItems(null); window.mp.lastfm.userTopAlbums(period, 50).then((a) => setItems(a as LastFmAlbum[])); }, [period]);
-  if (!items) return <div className="text-text-muted text-sm">Loading…</div>;
+  if (!items) return <LoadingStrip label="Loading from Last.fm…" className="py-3" />;
   if (items.length === 0) return <div className="text-text-muted text-sm">No albums for this period yet.</div>;
   return (
     <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-3">
@@ -336,7 +337,7 @@ function RecentTracks() {
     const t = setInterval(load, 30_000);  // refresh every 30s for "now playing"
     return () => clearInterval(t);
   }, []);
-  if (!items) return <div className="text-text-muted text-sm">Loading…</div>;
+  if (!items) return <LoadingStrip label="Loading from Last.fm…" className="py-3" />;
   if (items.length === 0) return <div className="text-text-muted text-sm">No scrobbles yet.</div>;
   return (
     <ol className="bg-bg-elev-1/40 rounded divide-y divide-white/5">
@@ -371,7 +372,7 @@ function Charts() {
     <div className="space-y-6">
       <div>
         <h3 className="text-lg font-semibold mb-3">Top artists worldwide</h3>
-        {!artists ? <div className="text-text-muted text-sm">Loading…</div> : (
+        {!artists ? <LoadingStrip label="Loading global top artists…" className="py-3" /> : (
           <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
             {artists.map((a, i) => (
               <div key={a.url} className="bg-bg-elev-1 p-3 rounded hover:bg-bg-elev-2 cursor-pointer" onClick={() => window.open(a.url, '_blank')}>
@@ -385,7 +386,7 @@ function Charts() {
       </div>
       <div>
         <h3 className="text-lg font-semibold mb-3">Top tracks worldwide</h3>
-        {!tracks ? <div className="text-text-muted text-sm">Loading…</div> : (
+        {!tracks ? <LoadingStrip label="Loading global top tracks…" className="py-3" /> : (
           <ol className="bg-bg-elev-1/40 rounded divide-y divide-white/5">
             {tracks.map((t, i) => (
               <li key={t.url} className="px-4 py-2 flex items-center gap-3 hover:bg-white/5 cursor-pointer" onClick={() => window.open(t.url, '_blank')}>
