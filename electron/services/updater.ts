@@ -196,6 +196,29 @@ export interface ApplyUpdateResult {
   newSha: string | null;
   pulledCommits: number;
   message: string;
+  // True when the updater ran `npm install` because package.json changed
+  // during the pull. The banner can show this so the user understands why
+  // the update took a minute instead of a couple of seconds.
+  ranNpmInstall?: boolean;
+}
+
+/**
+ * Did the `git pull` from `beforeSha` to `afterSha` touch package.json or
+ * package-lock.json? If so, node_modules is stale and we need to run
+ * `npm install` before restarting — otherwise the next launch will crash
+ * on a missing dependency (exactly the hls.js case that bit v0.2.2).
+ */
+async function dependencyManifestsChanged(beforeSha: string, afterSha: string): Promise<boolean> {
+  try {
+    const { stdout } = await exec('git', ['diff', '--name-only', `${beforeSha}..${afterSha}`], { cwd: projectRoot() });
+    const files = stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+    return files.some((f) => f === 'package.json' || f === 'package-lock.json');
+  } catch {
+    // If we can't determine the diff, be cautious and assume YES — running
+    // `npm install` unnecessarily takes a few seconds; skipping it when
+    // it's needed leaves the app broken.
+    return true;
+  }
 }
 
 /**
@@ -265,13 +288,58 @@ export async function applyUpdate(): Promise<ApplyUpdateResult> {
       pulledCommits = Number(stdout.trim()) || 0;
     } catch { /* leave as 0 */ }
   }
+
+  // If package.json / package-lock.json changed in this pull, run npm install
+  // before returning — otherwise the next launch will fail to resolve any
+  // newly-added dependency (e.g. hls.js added in v0.2.2). We rely on `exec`
+  // with a generous timeout; the user sees the banner spinner until this
+  // completes. Never block RESTART on install failure — better to launch
+  // with a warning than leave the app completely broken.
+  let ranNpmInstall = false;
+  if (beforeSha && afterSha && beforeSha !== afterSha) {
+    const needsInstall = await dependencyManifestsChanged(beforeSha, afterSha);
+    if (needsInstall) {
+      console.log('[updater] package.json changed — running npm install');
+      try {
+        // Windows: node/execFile can't run `.cmd` shims without help —
+        // npm on Windows is installed as `npm.cmd`. Everywhere else it's
+        // a plain executable.
+        const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+        await exec(npmBin, ['install', '--no-audit', '--no-fund'], {
+          cwd: projectRoot(),
+          // 5-minute ceiling — npm install on a cold cache can take a while,
+          // especially when native deps rebuild against Electron's ABI.
+          timeout: 5 * 60 * 1000,
+          maxBuffer: 32 * 1024 * 1024,
+          // Inherit PATH so `npm` is findable on Windows/Linux/macOS.
+          env: process.env,
+        });
+        ranNpmInstall = true;
+        console.log('[updater] npm install finished cleanly');
+      } catch (err: any) {
+        console.error('[updater] npm install FAILED', err?.message ?? err);
+        return {
+          ok: false,
+          needsRestart: false,
+          newSha: afterSha,
+          pulledCommits,
+          message: `Code was pulled but \`npm install\` failed: ${err?.message ?? err}. Run it manually from the project directory.`,
+          ranNpmInstall: false,
+        };
+      }
+    }
+  }
+
   return {
     ok: true,
     needsRestart: pulledCommits > 0,
     newSha: afterSha,
     pulledCommits,
+    ranNpmInstall,
     message: pulledCommits > 0
-      ? `Pulled ${pulledCommits} new commit${pulledCommits === 1 ? '' : 's'}. Restart to load them.`
+      ? (ranNpmInstall
+          ? `Pulled ${pulledCommits} new commit${pulledCommits === 1 ? '' : 's'} and installed new dependencies. Restart to load them.`
+          : `Pulled ${pulledCommits} new commit${pulledCommits === 1 ? '' : 's'}. Restart to load them.`)
       : 'Already up to date.',
   };
 }
