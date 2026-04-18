@@ -291,7 +291,35 @@ export const IPC = {
   UPDATE_APPLY: 'update:apply',
   // Debug
   DEBUG_TOGGLE_DEVTOOLS: 'debug:toggle-devtools',
+  // Internet radio (Radio-Browser)
+  RADIO_TOP: 'radio:top',
+  RADIO_TRENDING: 'radio:trending',
+  RADIO_SEARCH: 'radio:search',
+  RADIO_BY_TAG: 'radio:by-tag',
+  RADIO_BY_COUNTRY: 'radio:by-country',
+  RADIO_TAGS: 'radio:tags',
+  RADIO_CLICK: 'radio:click',
 } as const;
+
+export interface RadioStation {
+  stationuuid: string;
+  name: string;
+  url: string;
+  url_resolved: string;
+  homepage: string;
+  favicon: string;
+  tags: string;
+  country: string;
+  countrycode: string;
+  language: string;
+  codec: string;
+  bitrate: number;
+  votes: number;
+  clickcount: number;
+  lastcheckok: 0 | 1;
+}
+
+export interface RadioTag { name: string; stationcount: number; }
 
 export interface UpdateCheckResult {
   upToDate: boolean;

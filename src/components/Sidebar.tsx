@@ -40,6 +40,7 @@ export default function Sidebar() {
         <NavItem to="/albums" label="Albums" />
         <NavItem to="/artists" label="Artists" />
         <NavItem to="/playlists" label="Playlists" />
+        <NavItem to="/radio" label="Radio" />
         <NavItem to="/visualizer" label="Visualizer" />
       </nav>
 

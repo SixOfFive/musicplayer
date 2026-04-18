@@ -15,6 +15,7 @@ import ArtistsView from './views/ArtistsView';
 import ArtistView from './views/ArtistView';
 import PlaylistView from './views/PlaylistView';
 import PlaylistsView from './views/PlaylistsView';
+import RadioView from './views/RadioView';
 import Settings from './views/Settings';
 import Visualizer from './views/Visualizer';
 import { useLibrary } from './store/library';
@@ -52,6 +53,7 @@ export default function App() {
               <Route path="/artist/:id" element={<ArtistView />} />
               <Route path="/playlists" element={<PlaylistsView />} />
               <Route path="/playlist/:id" element={<PlaylistView />} />
+              <Route path="/radio" element={<RadioView />} />
               <Route path="/visualizer" element={<Visualizer />} />
               <Route path="/settings" element={<Settings />} />
               <Route path="/settings/:tab" element={<Settings />} />

@@ -12,9 +12,11 @@ export default function NowPlayingBar() {
     queue, index, isPlaying, toggle, next, prev, position, duration,
     volume, setVolume, seek, likedIds, toggleLike,
     shuffle, toggleShuffle, repeatMode, cycleRepeat,
+    radio,
   } = usePlayer();
   const cur = queue[index];
   const liked = cur ? likedIds.has(cur.id) : false;
+  const isRadio = radio != null;
 
   const repeatTitle =
     repeatMode === 'off' ? 'Repeat: off'
@@ -24,16 +26,36 @@ export default function NowPlayingBar() {
   return (
     <footer className="h-20 bg-bg-elev-1 border-t border-white/5 grid grid-cols-3 items-center px-4">
       <div className="flex items-center gap-3 min-w-0">
-        {cur?.coverArtPath ? (
+        {isRadio ? (
+          radio!.favicon ? (
+            <img src={radio!.favicon} onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }} className="w-14 h-14 rounded object-contain bg-bg-highlight" alt="" />
+          ) : (
+            <div className="w-14 h-14 rounded bg-bg-highlight flex items-center justify-center text-xl">📻</div>
+          )
+        ) : cur?.coverArtPath ? (
           <img src={mediaUrl(cur.coverArtPath)} className="w-14 h-14 rounded" alt="" />
         ) : (
           <div className="w-14 h-14 rounded bg-bg-highlight" />
         )}
         <div className="min-w-0">
-          <div className="text-sm text-text-primary truncate">{cur?.title ?? 'Nothing playing'}</div>
-          <div className="text-xs text-text-muted truncate">{cur?.artist ?? ''}</div>
+          {isRadio ? (
+            <>
+              <div className="text-sm text-text-primary truncate">{radio!.station}</div>
+              <div className="text-xs text-text-muted truncate">
+                <span className="text-accent font-semibold">LIVE</span>
+                {radio!.country ? ` · ${radio!.country}` : ''}
+                {radio!.codec ? ` · ${radio!.codec}` : ''}
+                {radio!.bitrate ? ` · ${radio!.bitrate}kbps` : ''}
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="text-sm text-text-primary truncate">{cur?.title ?? 'Nothing playing'}</div>
+              <div className="text-xs text-text-muted truncate">{cur?.artist ?? ''}</div>
+            </>
+          )}
         </div>
-        {cur && (
+        {!isRadio && cur && (
           <button
             onClick={() => toggleLike(cur.id)}
             className={`ml-3 text-lg ${liked ? 'text-accent' : 'text-text-muted hover:text-text-primary'}`}
@@ -45,6 +67,20 @@ export default function NowPlayingBar() {
       </div>
 
       <div className="flex flex-col items-center gap-1">
+        {isRadio ? (
+          <div className="flex items-center gap-3">
+            <button
+              onClick={toggle}
+              className="w-10 h-10 rounded-full bg-white text-black flex items-center justify-center hover:scale-105 transition"
+              title={isPlaying ? 'Stop stream' : 'Resume stream'}
+            >
+              {isPlaying ? '❚❚' : '▶'}
+            </button>
+            <span className="text-[11px] text-text-muted">
+              Live radio — no scrubbing, next/prev, or repeat
+            </span>
+          </div>
+        ) : <>
         <div className="flex items-center gap-3">
           {/* Shuffle */}
           <button
@@ -105,6 +141,7 @@ export default function NowPlayingBar() {
           />
           <span className="w-10">{fmt(duration)}</span>
         </div>
+        </>}
       </div>
 
       <div className="flex items-center justify-end gap-2 text-text-secondary">

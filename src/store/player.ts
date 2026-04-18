@@ -13,6 +13,16 @@ interface QueueItem {
 
 export type RepeatMode = 'off' | 'all' | 'one';
 
+export interface RadioNowPlaying {
+  station: string;      // display name
+  streamUrl: string;    // actual URL we're pulling from
+  homepage: string | null;
+  favicon: string | null;
+  country: string | null;
+  codec: string | null;
+  bitrate: number | null;
+}
+
 interface PlayerState {
   // The "play order" — this is what next/prev walk. When shuffle is on,
   // this is a shuffled permutation of `originalQueue`.
@@ -31,7 +41,13 @@ interface PlayerState {
   repeatMode: RepeatMode;
   shuffle: boolean;
 
+  // Radio mode: set when playing an internet radio stream. When non-null,
+  // `queue` is empty and track-oriented UI (prev/next/like/scrubber) is
+  // downgraded in the NowPlayingBar.
+  radio: RadioNowPlaying | null;
+
   play(items: QueueItem[], startIndex?: number): Promise<void>;
+  playRadio(station: RadioNowPlaying): Promise<void>;
   toggle(): void;
   next(): void;
   prev(): void;
@@ -129,6 +145,12 @@ export const usePlayer = create<PlayerState>((set, get) => {
 
   async function loadAndPlay(cur: QueueItem) {
     const url = await makeUrl(cur.path);
+    // Local files go through our mp-media:// protocol which supports CORS.
+    // Setting crossOrigin before src is required for the MediaElementSource
+    // → AnalyserNode chain to see audio samples (otherwise Web Audio returns
+    // silent buffers for privacy reasons). Radio stations may have turned
+    // this off; restore it every time we play a local track.
+    engine.element.crossOrigin = 'anonymous';
     engine.setSrc(url);
     // Prime the displayed duration from the DB-parsed tag value so the right-
     // hand time readout shows something immediately. The HTMLAudioElement's
@@ -222,9 +244,12 @@ export const usePlayer = create<PlayerState>((set, get) => {
     likedIds: new Set<number>(),
     repeatMode: 'off',
     shuffle: false,
+    radio: null,
 
     async play(items, startIndex = 0) {
       flushAccounting(accountingDurationSec ? accountedSec / accountingDurationSec > 0.5 : false);
+      // Switching to local files clears radio mode.
+      set({ radio: null });
 
       // Honour the current shuffle toggle: if on, reshuffle the new queue.
       const { shuffle } = get();
@@ -241,6 +266,28 @@ export const usePlayer = create<PlayerState>((set, get) => {
       if (!cur) return;
       console.log(`[player] play | title="${cur.title}" | shuffle=${shuffle} | queueLen=${playQueue.length}`);
       await loadAndPlay(cur);
+    },
+
+    async playRadio(station) {
+      // End whatever local-file listening was in progress (flush stats first).
+      flushAccounting(accountingDurationSec ? accountedSec / accountingDurationSec > 0.5 : false);
+      // Radio can't be scrobbled / counted as a track play — clear accounting.
+      accountingTrackId = null;
+      accountingDurationSec = null;
+      accountedSec = 0;
+      lastTickAt = null;
+
+      set({ radio: station, queue: [], originalQueue: [], index: -1, duration: 0, position: 0 });
+      console.log(`[player] playRadio | station="${station.station}" | url=${station.streamUrl}`);
+      // Radio streams are cross-origin. Keeping crossOrigin='anonymous' is what
+      // unlocked Web Audio analysis for the visualizer on local files; many
+      // radio servers don't send CORS headers, which would silence analysis.
+      // We drop crossOrigin so audio plays; the visualizer gets quiet on
+      // stations that don't allow CORS but still works on those that do.
+      engine.element.removeAttribute('crossorigin');
+      engine.setSrc(station.streamUrl);
+      try { await engine.play(); }
+      catch (err) { console.error('[player] radio play failed', err); }
     },
 
     toggle() {

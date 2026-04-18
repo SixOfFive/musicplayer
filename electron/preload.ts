@@ -78,6 +78,15 @@ const api = {
   debug: {
     toggleDevTools: () => ipcRenderer.invoke(IPC.DEBUG_TOGGLE_DEVTOOLS),
   },
+  radio: {
+    top: (limit?: number) => ipcRenderer.invoke(IPC.RADIO_TOP, limit),
+    trending: (limit?: number) => ipcRenderer.invoke(IPC.RADIO_TRENDING, limit),
+    search: (q: string, limit?: number) => ipcRenderer.invoke(IPC.RADIO_SEARCH, q, limit),
+    byTag: (tag: string, limit?: number) => ipcRenderer.invoke(IPC.RADIO_BY_TAG, tag, limit),
+    byCountry: (cc: string, limit?: number) => ipcRenderer.invoke(IPC.RADIO_BY_COUNTRY, cc, limit),
+    tags: (limit?: number) => ipcRenderer.invoke(IPC.RADIO_TAGS, limit),
+    click: (uuid: string) => ipcRenderer.invoke(IPC.RADIO_CLICK, uuid),
+  },
   convert: {
     checkAvailable: () => ipcRenderer.invoke(IPC.CONVERT_CHECK_AVAILABLE),
     albumToMp3: (albumId: number) => ipcRenderer.invoke(IPC.CONVERT_ALBUM_TO_MP3, albumId),
