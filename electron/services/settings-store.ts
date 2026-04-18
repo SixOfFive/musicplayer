@@ -13,7 +13,7 @@ function defaults(): AppSettings {
     conversion: {
       enabled: true,
       quality: 'V0',
-      sizePercentileThreshold: 66,
+      minSavingsPercent: 5,
       moveOriginalsToTrash: true,
     },
     playlistExport: {

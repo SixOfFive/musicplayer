@@ -9,11 +9,14 @@ export default function AlbumsView() {
   const [sortBy, setSortBy] = useState<AlbumSort>('title');
   const [sortDir, setSortDir] = useState<SortDir>('asc');
   const [genreFilter, setGenreFilter] = useState<string>('');
-  const [threshold, setThreshold] = useState<number | undefined>(undefined);
+  const [minSavings, setMinSavings] = useState<number>(5);
 
   const load = useCallback(() => {
     window.mp.library.albums({ limit: 1000, sortBy, sortDir, genre: genreFilter || undefined }).then(setAlbums);
-    window.mp.library.stats().then((s: any) => setThreshold(s?.albumSizeThresholdBytes)).catch(() => {});
+    window.mp.settings.get().then((s: any) => {
+      const p = s?.conversion?.minSavingsPercent;
+      if (typeof p === 'number') setMinSavings(p);
+    }).catch(() => {});
   }, [sortBy, sortDir, genreFilter]);
 
   useEffect(() => { load(); }, [load]);
@@ -47,7 +50,7 @@ export default function AlbumsView() {
       </div>
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-4">
         {albums.map((a) => (
-          <AlbumCard key={a.id} album={a} sizeThreshold={threshold} />
+          <AlbumCard key={a.id} album={a} minSavingsPercent={minSavings} />
         ))}
       </div>
     </section>

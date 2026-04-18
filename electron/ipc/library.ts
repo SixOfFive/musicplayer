@@ -1,7 +1,7 @@
 import type { BrowserWindow, IpcMain } from 'electron';
 import { app, shell } from 'electron';
 import fs from 'node:fs/promises';
-import { IPC, type TrackQuery, type AlbumQuery, type TrackSort, type AlbumSort } from '../../shared/types';
+import { IPC, type TrackQuery, type AlbumQuery, type TrackSort, type AlbumSort, MP3_SIZE_RATIO_VS_FLAC } from '../../shared/types';
 import { getDb } from '../services/db';
 import { getSettings } from '../services/settings-store';
 
@@ -83,6 +83,12 @@ export function registerLibraryIpc(ipcMain: IpcMain, _getWin: () => BrowserWindo
                (SELECT COUNT(*) FROM tracks t WHERE t.album_id = al.id) AS track_count,
                (SELECT COALESCE(SUM(size), 0) FROM tracks t WHERE t.album_id = al.id) AS bytes,
                (SELECT COUNT(*) FROM tracks t WHERE t.album_id = al.id AND LOWER(t.path) LIKE '%.flac') AS flac_count,
+               (SELECT COALESCE(SUM(size), 0) FROM tracks t WHERE t.album_id = al.id AND LOWER(t.path) LIKE '%.flac') AS flac_bytes,
+               CAST(
+                 (SELECT COALESCE(SUM(size), 0) FROM tracks t WHERE t.album_id = al.id AND LOWER(t.path) LIKE '%.flac')
+                 * (1 - ${MP3_SIZE_RATIO_VS_FLAC})
+                 AS INTEGER
+               ) AS projected_mp3_savings,
                (SELECT MAX(date_added) FROM tracks t WHERE t.album_id = al.id) AS date_added
         FROM albums al
         LEFT JOIN artists ar ON ar.id = al.artist_id
@@ -249,20 +255,6 @@ export function registerLibraryIpc(ipcMain: IpcMain, _getWin: () => BrowserWindo
       LIMIT 8
     `).all() as Array<{ id: number; title: string; artist: string | null; album: string | null; dateAdded: number; coverArtPath: string | null }>;
 
-    // Compute the album-size threshold for the "shrink this album" button.
-    // SQLite sorts NULLs first, so drop zero-byte albums before picking the percentile.
-    const pct = Math.max(0, Math.min(100, getSettings().conversion?.sizePercentileThreshold ?? 66));
-    const albumBytes = db.prepare(`
-      SELECT COALESCE(SUM(t.size), 0) AS b
-      FROM albums al
-      JOIN tracks t ON t.album_id = al.id
-      GROUP BY al.id HAVING b > 0
-      ORDER BY b ASC
-    `).all() as Array<{ b: number }>;
-    const albumSizeThresholdBytes = albumBytes.length > 0
-      ? albumBytes[Math.min(albumBytes.length - 1, Math.floor(albumBytes.length * pct / 100))].b
-      : Number.MAX_SAFE_INTEGER;
-
     return {
       trackCount: counts.track_count,
       albumCount: counts.album_count,
@@ -279,7 +271,6 @@ export function registerLibraryIpc(ipcMain: IpcMain, _getWin: () => BrowserWindo
       biggestAlbum: biggestAlbum ?? null,
       longestTrack: longestTrack ?? null,
       mostRecentlyAdded: recent,
-      albumSizeThresholdBytes,
     };
   });
 

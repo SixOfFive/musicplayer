@@ -126,14 +126,26 @@ export interface ConversionSettings {
   enabled: boolean;
   // MP3 quality preset. V0 ≈ 245 kbps VBR (archival); CBR320 is max constant bitrate.
   quality: Mp3Quality;
-  // Show the "Shrink album" button on albums above this percentile of library
-  // album size. 66 = top third by bytes. 0 disables the size gate (always show).
-  sizePercentileThreshold: number;
+  // Show the "Shrink album" button when converting this album's FLAC tracks to
+  // MP3 would save at least this much of the album's total size, as a percent.
+  // Default 5: "show it when it'll shave 5% or more off the album".
+  // 0 = always show the button (useful when you want to force-convert anything
+  // with FLAC in it regardless of savings).
+  minSavingsPercent: number;
   // After converting, move originals to trash (default) or delete permanently.
   // We never just unlink without shell.trashItem — this bool only picks which
   // safe removal method to use.
   moveOriginalsToTrash: boolean;
 }
+
+/**
+ * Estimated ratio of MP3 V0 size to FLAC size. Based on: CD-quality FLAC
+ * (16/44.1) is ~850-900 kbps; V0 MP3 averages ~245 kbps. That's ~0.29 raw,
+ * but we use 0.35 to be conservative — hi-res FLACs compress even more
+ * aggressively, and we'd rather UNDER-promise savings than over-promise them.
+ * Therefore `projected_savings = flac_bytes * (1 - MP3_SIZE_RATIO_VS_FLAC)`.
+ */
+export const MP3_SIZE_RATIO_VS_FLAC = 0.35;
 
 export interface ConvertProgress {
   phase: 'idle' | 'starting' | 'converting' | 'verifying' | 'removing-originals' | 'done' | 'error';
@@ -324,9 +336,6 @@ export interface LibraryStats {
   biggestAlbum: { title: string; artist: string | null; bytes: number } | null;
   longestTrack: { title: string; artist: string | null; seconds: number } | null;
   mostRecentlyAdded: Array<{ id: number; title: string; artist: string | null; album: string | null; dateAdded: number; coverArtPath: string | null }>;
-  // Byte threshold for "oversized album" (derived from conversion.sizePercentileThreshold).
-  // Albums with bytes >= this value are shown the FLAC-to-MP3 conversion button.
-  albumSizeThresholdBytes: number;
 }
 
 export interface StatsOverview {

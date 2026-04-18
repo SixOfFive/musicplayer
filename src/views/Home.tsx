@@ -90,7 +90,7 @@ export default function Home() {
         <div className="mb-8">
           <h2 className="text-xl font-semibold mb-3">Newest albums</h2>
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-4">
-            {albums.map((a) => <AlbumCard key={a.id} album={a} sizeThreshold={stats?.albumSizeThresholdBytes} />)}
+            {albums.map((a) => <AlbumCard key={a.id} album={a} />)}
           </div>
         </div>
       )}

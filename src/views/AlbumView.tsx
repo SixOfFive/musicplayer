@@ -6,7 +6,7 @@ import { useLibraryRefresh } from '../hooks/useLibraryRefresh';
 import { mediaUrl } from '../lib/mediaUrl';
 import ShrinkAlbumButton from '../components/ShrinkAlbumButton';
 import MiniVisualizer from '../components/MiniVisualizer';
-import type { LibraryStats } from '../../shared/types';
+import { formatBytes } from '../hooks/useScanProgress';
 
 interface AlbumMeta {
   id: number;
@@ -22,7 +22,6 @@ export default function AlbumView() {
   const aid = Number(id);
   const [album, setAlbum] = useState<AlbumMeta | null>(null);
   const [tracks, setTracks] = useState<RowTrack[]>([]);
-  const [stats, setStats] = useState<LibraryStats | null>(null);
   const play = usePlayer((s) => s.play);
 
   const load = useCallback(() => {
@@ -30,7 +29,6 @@ export default function AlbumView() {
       setAlbum(res.album);
       setTracks(res.tracks);
     });
-    window.mp.library.stats().then(setStats).catch(() => {});
   }, [aid]);
 
   useEffect(() => { load(); }, [load]);
@@ -86,22 +84,23 @@ export default function AlbumView() {
 
         {(() => {
           const flacCount = tracks.filter((t) => /\.flac$/i.test(t.path)).length;
-          const bytes = tracks.reduce((n, t: any) => n + (t.size ?? 0), 0);
-          const threshold = stats?.albumSizeThresholdBytes ?? Number.MAX_SAFE_INTEGER;
-          const oversized = bytes >= threshold;
           if (flacCount === 0) return null;
-          // Always available from the album page — hide it only on tiny albums
-          // that would free <20 MB, where the effort isn't worth it.
-          const worthwhile = bytes > 20 * 1024 * 1024;
-          if (!worthwhile) return null;
+          const bytes = tracks.reduce((n, t: any) => n + (t.size ?? 0), 0);
+          const flacBytes = tracks
+            .filter((t) => /\.flac$/i.test(t.path))
+            .reduce((n, t: any) => n + (t.size ?? 0), 0);
+          // Same estimate used by the library query: V0 MP3 ≈ 35% of FLAC size.
+          const projectedSavings = flacBytes * 0.65;
+          const savingsPct = bytes > 0 ? (projectedSavings / bytes) * 100 : 0;
+          // Always show the button on the album page so users can force-convert
+          // even small albums, but label it with the projected savings so they
+          // can see whether it's worth it.
           return (
             <div className="flex flex-col gap-1">
               <ShrinkAlbumButton albumId={aid} albumTitle={album.title} flacCount={flacCount} bytes={bytes} />
-              {oversized && (
-                <div className="text-[10px] text-text-muted">
-                  ↑ above the 66th-percentile album size — good candidate for conversion
-                </div>
-              )}
+              <div className="text-[10px] text-text-muted">
+                Estimated savings: ~{formatBytes(projectedSavings)} ({savingsPct.toFixed(1)}% of album)
+              </div>
             </div>
           );
         })()}

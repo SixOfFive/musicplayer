@@ -19,7 +19,7 @@ export default function ConversionSettings() {
 
   if (!s) return null;
   const c = s.conversion ?? {
-    enabled: true, quality: 'V0', sizePercentileThreshold: 66, moveOriginalsToTrash: true,
+    enabled: true, quality: 'V0', minSavingsPercent: 5, moveOriginalsToTrash: true,
   };
 
   async function patch(p: Partial<AppSettings['conversion']>) {
@@ -76,19 +76,21 @@ export default function ConversionSettings() {
           </div>
 
           <div>
-            <div className="font-medium mb-2">Oversized threshold</div>
+            <div className="font-medium mb-2">When to show the 🗜 badge</div>
             <p className="text-xs text-text-muted mb-2">
-              Shows the 🗜 badge on albums whose total size is at or above the Nth percentile by bytes.
-              <strong className="text-white"> 66</strong> = top third (default). <strong className="text-white">0</strong> = every album qualifies.
+              We flag an album as "shrinkable" when converting its FLAC tracks to MP3 would
+              free at least this much of the album's total size. V0 MP3 ends up ~35% the size of FLAC,
+              so any album that's mostly FLAC easily exceeds 5%. Raise this to hide the badge on albums
+              with only a tiny bit of FLAC; drop to <strong className="text-white">0</strong> to always show the badge when any FLAC is present.
             </p>
             <div className="flex items-center gap-3">
               <input
-                type="range" min={0} max={99} step={1}
-                value={c.sizePercentileThreshold}
-                onChange={(e) => patch({ sizePercentileThreshold: Number(e.target.value) })}
+                type="range" min={0} max={50} step={1}
+                value={c.minSavingsPercent}
+                onChange={(e) => patch({ minSavingsPercent: Number(e.target.value) })}
                 className="flex-1 accent-accent"
               />
-              <span className="w-20 text-right tabular-nums">{c.sizePercentileThreshold}th pct</span>
+              <span className="w-24 text-right tabular-nums">≥ {c.minSavingsPercent}% savings</span>
             </div>
           </div>
 
