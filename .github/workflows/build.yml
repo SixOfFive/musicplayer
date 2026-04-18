@@ -42,10 +42,12 @@ jobs:
 
       # Linux-only: electron-builder's fpm backend needs these to produce
       # .deb / .rpm / AppImage outputs. Missing on the hosted image by default.
+      # bsdtar (libarchive-tools) is required for AppImage assembly; the rest
+      # are for .deb / .rpm fallback targets.
       - if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y rpm fakeroot dpkg
+          sudo apt-get install -y rpm fakeroot dpkg libarchive-tools
 
       - name: Install dependencies
         # Not `npm ci`: that step doesn't always re-run postinstall hooks when
