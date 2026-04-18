@@ -76,6 +76,7 @@
     },
     "linux": {
       "category": "AudioVideo;Audio;Player;",
+      "maintainer": "sixoffive <sixoffive@users.noreply.github.com>",
       "target": [
         "deb",
         "rpm",
