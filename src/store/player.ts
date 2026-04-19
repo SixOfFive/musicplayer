@@ -374,8 +374,31 @@ export const usePlayer = create<PlayerState>((set, get) => {
     },
 
     toggle() {
-      if (engine.element.paused) engine.play();
-      else engine.pause();
+      // Self-heal: if the element is in error state (file deleted out from
+      // under us by Shrink / Rescan, decode error, network blip on an HLS
+      // stream), a plain `play()` here will reject with the same error —
+      // the element never recovers on its own. Rebuild from the current
+      // queue item so the user can get moving again without navigating
+      // away.
+      //
+      // Symptom this fixes: "I clicked play again and nothing happened" /
+      // "I can't scrub anymore" — after the FLAC we were playing got
+      // converted to MP3 (or the album was rescanned and the file was
+      // missing), the element's internal error blocks all further input.
+      const s = get();
+      if (engine.element.error && s.queue[s.index]) {
+        console.warn(`[player] toggle: element in error state (code=${engine.element.error.code} msg=${engine.element.error.message ?? ''}) — reloading current track`);
+        void loadAndPlay(s.queue[s.index]);
+        return;
+      }
+      if (engine.element.paused) {
+        // Swallow the promise so a double-click (play-then-pause-then-play)
+        // AbortError doesn't escape as an unhandled rejection. engine.play
+        // already logs failures.
+        engine.play().catch(() => { /* logged inside engine.play */ });
+      } else {
+        engine.pause();
+      }
     },
 
     async next() {
@@ -405,7 +428,27 @@ export const usePlayer = create<PlayerState>((set, get) => {
       await loadAndPlay(s.queue[ni]);
     },
 
-    seek(sec) { engine.seek(sec); },
+    seek(sec) {
+      // Same self-heal as toggle(): if the element is in error state, setting
+      // currentTime is a no-op and the scrubber locks at 0. Reload the
+      // current track first, then jump to the requested position once the
+      // element has data.
+      const s = get();
+      if (engine.element.error && s.queue[s.index]) {
+        console.warn(`[player] seek(${sec}): element in error state — reloading current track then seeking`);
+        const seekTo = sec;
+        void loadAndPlay(s.queue[s.index]).then(() => {
+          // loadAndPlay just set src + started play; wait for the element to
+          // have enough data to seek reliably. `loadedmetadata` is the
+          // earliest point seeking is valid.
+          const apply = () => { engine.seek(seekTo); engine.element.removeEventListener('loadedmetadata', apply); };
+          if (Number.isFinite(engine.element.duration) && engine.element.duration > 0) apply();
+          else engine.element.addEventListener('loadedmetadata', apply, { once: true });
+        });
+        return;
+      }
+      engine.seek(sec);
+    },
     setVolume(v) { engine.setVolume(v); set({ volume: v }); scheduleVolumeSave(v); },
     setLikedIds(ids) { set({ likedIds: new Set(ids) }); },
     async toggleLike(trackId) {
