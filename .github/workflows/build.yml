@@ -29,9 +29,12 @@ jobs:
             artifact_glob: 'release/*.exe'
             artifact_name: windows-installer
           - os: ubuntu-latest
+            # RPM dropped — fpm's rpmbuild invocation on hosted runners
+            # exits 1 intermittently and swallows rpmbuild's own stderr,
+            # so there's nothing actionable to fix. Users on Fedora /
+            # openSUSE can extract the .tar.gz or `alien` the .deb.
             artifact_glob: |
               release/*.deb
-              release/*.rpm
               release/*.tar.gz
             artifact_name: linux-installers
           - os: macos-latest

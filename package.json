@@ -79,7 +79,6 @@
       "maintainer": "sixoffive <sixoffive@users.noreply.github.com>",
       "target": [
         "deb",
-        "rpm",
         "tar.gz"
       ]
     },
