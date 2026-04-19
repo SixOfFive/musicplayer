@@ -46,7 +46,9 @@ Each script runs `npm version <level>`, which:
 3. Tags that commit `v0.X.Y`
 4. Pushes the commit + tag
 
-The tag push triggers the `build` workflow with `--publish always`, which creates a GitHub Release and uploads the Windows `.exe`, macOS `.dmg`, Linux `.deb`/`.rpm`/`.tar.gz`, plus the `latest.yml` metadata files `electron-updater` reads. A few minutes later, every installed user gets the blue banner.
+The tag push triggers the `build` workflow with `--publish always`, which creates a GitHub Release and uploads the Windows `.exe`, macOS `.dmg`, Linux `.deb`/`.tar.gz`, plus the `latest.yml` metadata files `electron-updater` reads. A few minutes later, every installed user gets the blue banner.
+
+> **No RPM builds.** fpm's `rpmbuild` invocation on GitHub's hosted Ubuntu runners exits 1 intermittently and swallows rpmbuild's own stderr — not actionable. RPM-based distros (Fedora, openSUSE, RHEL) can extract the Linux `.tar.gz` and run the binary directly, or convert the `.deb` with [`alien`](https://wiki.debian.org/Alien).
 
 ---
 
@@ -276,7 +278,7 @@ npm run electron:build      # produces platform installer via electron-builder
 - Progress bar, cancellation, and DB path/codec/size updates in a single transaction at the end
 
 ### Auto-update
-- **Installer builds** (downloaded `.exe`/`.dmg`/`.deb`/`.rpm`): `electron-updater` checks GitHub Releases on startup + every 30 min. When a new version lands, a blue banner shows live download progress, then flips green ("Restart to install") — one click applies. Library DB + settings + playlists all survive.
+- **Installer builds** (downloaded `.exe`/`.dmg`/`.deb`): `electron-updater` checks GitHub Releases on startup + every 30 min. When a new version lands, a blue banner shows live download progress, then flips green ("Restart to install") — one click applies. Library DB + settings + playlists all survive.
 - **Source installs** (`git clone` + `run.bat`/`run.sh`): yellow banner when main has new commits. Click "Update now" → `git pull --ff-only`. `package.json` change triggers auto-`npm install` on next launch.
 
 ### Settings (five tabs)
