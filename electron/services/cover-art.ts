@@ -192,3 +192,86 @@ function isInside(child: string, parent: string): boolean {
 async function fileExists(p: string): Promise<boolean> {
   try { await fs.access(p); return true; } catch { return false; }
 }
+
+/**
+ * Look in a folder for a cover art file placed by another tool / another
+ * machine. The priority order matches the de-facto convention that Jellyfin,
+ * Plex, MusicBee, foobar2000, kid3 and friends all use:
+ *
+ *     {userPreferred}.ext  → configurable in Settings → Library (default 'cover')
+ *     cover.ext            → most common
+ *     folder.ext           → Windows / older Windows Media Player convention
+ *     front.ext            → MusicBrainz Picard's default export
+ *     album.ext            → rarer, but some rippers use it
+ *
+ * Extensions checked in order: jpg, jpeg, png, webp.
+ *
+ * Returns the first matching absolute path, or null if none of them exist.
+ * Case-insensitive lookup so "Cover.JPG" works on case-sensitive filesystems.
+ */
+export async function findFolderCover(folder: string, preferredBaseName?: string): Promise<string | null> {
+  const preferred = (preferredBaseName || 'cover').toLowerCase();
+  // De-dup in case the user's preferred name is one of the fallbacks.
+  const baseNames = Array.from(new Set([preferred, 'cover', 'folder', 'front', 'album']));
+  const exts = ['.jpg', '.jpeg', '.png', '.webp'];
+
+  let entries: string[];
+  try { entries = await fs.readdir(folder); }
+  catch { return null; } // folder unreachable / permission / path doesn't exist
+
+  // Build a lowercase-name → original-name map so we can look up without
+  // iterating repeatedly. This matters on libraries with huge albums
+  // (hundreds of entries per folder).
+  const lookup = new Map<string, string>();
+  for (const e of entries) lookup.set(e.toLowerCase(), e);
+
+  for (const base of baseNames) {
+    for (const ext of exts) {
+      const orig = lookup.get(`${base}${ext}`);
+      if (orig) return path.join(folder, orig);
+    }
+  }
+  return null;
+}
+
+/**
+ * Scan every album with no cover_art_path and probe its folder for an
+ * existing cover.* / folder.* / etc. file. Update the DB when one is found.
+ *
+ * The use case this was written for: shared music filesystem (NAS, synced
+ * cloud folder, SMB share) where one machine has downloaded covers into the
+ * album folders and the OTHER machine's DB still has NULL cover_art_path
+ * because ITS scan happened before the covers arrived. Without this, the
+ * second machine would queue all those albums for online fetch on startup,
+ * duplicating work that already happened on disk.
+ *
+ * Runs at startup before resumeArtFetchOnStartup so the online fetcher
+ * doesn't waste time re-downloading art that's already on disk. Also called
+ * manually from the Settings button if the user wants to kick it off later.
+ *
+ * Returns { scanned, reclaimed } — scanned is the number of NULL-art albums
+ * we looked at, reclaimed is how many had existing folder covers we picked
+ * up.
+ */
+export async function reclaimFolderCovers(): Promise<{ scanned: number; reclaimed: number }> {
+  const db = getDb();
+  const settings = getSettings();
+  const rows = db.prepare(`
+    SELECT id FROM albums
+    WHERE cover_art_path IS NULL OR cover_art_path = ''
+  `).all() as Array<{ id: number }>;
+
+  const updateStmt = db.prepare('UPDATE albums SET cover_art_path = ?, art_lookup_failed = 0 WHERE id = ?');
+
+  let reclaimed = 0;
+  for (const row of rows) {
+    const folder = await resolveAlbumFolder(row.id);
+    if (!folder) continue;
+    const found = await findFolderCover(folder, settings.library.coverArtFilename);
+    if (found) {
+      updateStmt.run(found, row.id);
+      reclaimed++;
+    }
+  }
+  return { scanned: rows.length, reclaimed };
+}

@@ -5,7 +5,7 @@ import { IPC, type ScanProgress } from '../../shared/types';
 import { getDb } from '../services/db';
 import { getSettings } from '../services/settings-store';
 import { fetchAlbumArt, persistAlbumArt } from '../services/metadata-providers';
-import { saveAlbumArt } from '../services/cover-art';
+import { saveAlbumArt, findFolderCover, reclaimFolderCovers } from '../services/cover-art';
 import { exportAllPlaylists } from '../services/playlist-export';
 
 // Set by main.ts once the window exists. Lets services outside the IPC
@@ -297,13 +297,26 @@ export function registerScanIpc(ipcMain: IpcMain, getWin: () => BrowserWindow | 
 
           if (albumId) albumsTouchedThisRun.add(albumId);
 
-          // Save embedded cover art if we don't have one for this album yet.
+          // Cover art resolution order:
+          //   1. Embedded art inside the audio file (free, best quality)
+          //   2. An existing cover.* / folder.* / front.* / album.* file
+          //      already sitting in the album's folder (placed by another
+          //      machine on a shared filesystem, by a tagger, by Jellyfin,
+          //      etc.). No download needed — just point the DB at it.
+          //   3. (Later) the online fetcher runs against whatever's still
+          //      NULL after this pass.
           if (albumId && settings.scan.fetchCoverArt) {
             const row = db.prepare('SELECT cover_art_path FROM albums WHERE id = ?').get(albumId) as { cover_art_path: string | null } | undefined;
-            if (!row?.cover_art_path && md.common.picture && md.common.picture[0]) {
-              await saveEmbeddedCoverArt(albumId, md.common.picture[0]);
-              // We got art from the file itself — clear any prior "failed lookup" flag.
-              db.prepare('UPDATE albums SET art_lookup_failed = 0 WHERE id = ?').run(albumId);
+            if (!row?.cover_art_path) {
+              if (md.common.picture && md.common.picture[0]) {
+                await saveEmbeddedCoverArt(albumId, md.common.picture[0]);
+                db.prepare('UPDATE albums SET art_lookup_failed = 0 WHERE id = ?').run(albumId);
+              } else {
+                const existing = await findFolderCover(path.dirname(f), settings.library.coverArtFilename);
+                if (existing) {
+                  db.prepare('UPDATE albums SET cover_art_path = ?, art_lookup_failed = 0 WHERE id = ?').run(existing, albumId);
+                }
+              }
             }
           }
         } catch (err: any) {
@@ -749,6 +762,21 @@ export async function rescanAlbum(albumId: number): Promise<RescanAlbumResult> {
 export async function resumeArtFetchOnStartup(): Promise<void> {
   const settings = getSettings();
   if (!settings.scan.fetchCoverArt || settings.scan.providers.length === 0) return;
+
+  // Before hitting the online providers, probe every NULL-art album's
+  // folder for an existing cover.* / folder.* / front.* / album.* file.
+  // Matters when the music lives on a shared filesystem and another
+  // machine already downloaded the art — we should pick that up for free
+  // instead of re-fetching. Reports a quick summary to stdout so users
+  // tailing the log can see why the art strip didn't do much this time.
+  try {
+    const r = await reclaimFolderCovers();
+    if (r.reclaimed > 0) {
+      console.log(`[startup] reclaimed ${r.reclaimed} existing folder covers (out of ${r.scanned} NULL-art albums) — no online fetch needed for those`);
+    }
+  } catch (err: any) {
+    console.error('[startup] reclaimFolderCovers failed:', err?.message ?? err);
+  }
 
   const pending = (getDb()
     .prepare(`
