@@ -74,11 +74,22 @@ export default function TrackRow({
     window.dispatchEvent(new CustomEvent('mp-library-changed'));
   }
 
+  // Derive the A-Z bucket from the track title so the AlphaRail can jump
+  // to this row. Inline the same normalisation AlphaRail uses to avoid a
+  // cross-import cycle between a low-level presentational component and
+  // a view-level chrome component.
+  const alphaLetter = (() => {
+    const s = (track.title ?? '').trim().replace(/^[^\p{L}\p{N}]+/u, '');
+    const c = s.charAt(0);
+    return /^[A-Za-z]$/.test(c) ? c.toUpperCase() : '#';
+  })();
+
   return (
     <>
       <div
         onClick={playHere}
         onContextMenu={(e) => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY }); }}
+        data-alpha-letter={alphaLetter}
         className="grid grid-cols-[24px_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_72px_40px] gap-3 items-center px-4 py-2 text-sm rounded hover:bg-white/5 cursor-pointer select-none"
       >
         <div className="text-text-muted text-right">{index + 1}</div>

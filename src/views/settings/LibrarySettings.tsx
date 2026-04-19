@@ -125,6 +125,15 @@ export default function LibrarySettings() {
                 onChange={async () => {
                   setArtStorage('album-folder');
                   await window.mp.settings.set({ library: { coverArtStorage: 'album-folder' } } as any);
+                  // Auto-migrate existing cached art so the user doesn't have
+                  // to remember to click the button. Idempotent — re-running
+                  // later via the button does no harm.
+                  try {
+                    const res = await (window.mp.library as any).migrateCoverArt();
+                    if (res.moved > 0 || res.skippedExisting > 0) {
+                      console.log(`[settings] cover-art migration: moved=${res.moved}, kept=${res.skippedExisting}, failed=${res.failed}`);
+                    }
+                  } catch (err) { console.error('[settings] auto cover-art migration failed', err); }
                 }}
               />
               <span>
@@ -136,6 +145,12 @@ export default function LibrarySettings() {
                 </p>
               </span>
             </label>
+
+            {/* Migration button — moves existing art out of the cache folder.
+                Shown regardless of the currently-selected strategy so users
+                can consolidate after toggling, or re-run if a previous
+                migration left some albums behind. */}
+            <MigrateArtButton />
 
             {artStorage === 'album-folder' && (
               <div className="mt-3 flex items-center gap-2">
@@ -156,7 +171,9 @@ export default function LibrarySettings() {
             )}
 
             <p className="text-xs text-text-muted mt-3">
-              Only affects cover art saved <em>from now on</em>. Existing art isn't moved. Run a rescan to re-extract embedded art into the new location.
+              Switching to "Alongside the audio files" automatically moves your existing cached
+              cover art into each album's folder. If you want to consolidate again later (or
+              after a bulk scan), use the button above.
             </p>
           </div>
         </div>
@@ -259,6 +276,73 @@ export default function LibrarySettings() {
           </label>
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Button + status readout for the cover-art migration (cache → album folder).
+ * Idempotent — clicking more than once is safe; a second click just reports
+ * `moved: 0`.
+ */
+function MigrateArtButton() {
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState<null | {
+    total: number; moved: number; skippedExisting: number;
+    skippedNoFolder: number; failed: number; errors: string[];
+  }>(null);
+
+  async function run() {
+    setRunning(true);
+    setResult(null);
+    try {
+      const r = await (window.mp.library as any).migrateCoverArt();
+      setResult(r);
+    } catch (err: any) {
+      setResult({ total: 0, moved: 0, skippedExisting: 0, skippedNoFolder: 0, failed: 1, errors: [err?.message ?? String(err)] });
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  return (
+    <div className="mt-2 p-3 bg-bg-base rounded border border-white/5">
+      <div className="flex items-center gap-3">
+        <button
+          onClick={run}
+          disabled={running}
+          className="text-xs px-3 py-1.5 rounded bg-accent text-black font-semibold hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed"
+          title="Relocate cached cover art into each album's folder"
+        >
+          {running ? 'Moving…' : 'Move cached cover art to album folders'}
+        </button>
+        <span className="text-xs text-text-muted">
+          One-shot consolidation. Safe to run anytime; albums already in their folder are skipped.
+        </span>
+      </div>
+      {result && (
+        <div className="mt-3 text-xs text-text-muted space-y-0.5">
+          <div>Total cached albums considered: <span className="text-text-primary">{result.total}</span></div>
+          <div>Moved into album folder: <span className="text-text-primary">{result.moved}</span></div>
+          {result.skippedExisting > 0 && (
+            <div>Already had a cover file (DB re-pointed): <span className="text-text-primary">{result.skippedExisting}</span></div>
+          )}
+          {result.skippedNoFolder > 0 && (
+            <div>Skipped — couldn't resolve album folder: <span className="text-text-primary">{result.skippedNoFolder}</span></div>
+          )}
+          {result.failed > 0 && (
+            <div className="text-red-400">Failed: {result.failed}</div>
+          )}
+          {result.errors.length > 0 && (
+            <details className="mt-1">
+              <summary className="cursor-pointer text-text-muted">Errors ({result.errors.length})</summary>
+              <ul className="mt-1 ml-4 list-disc">
+                {result.errors.map((e, i) => <li key={i} className="text-red-400">{e}</li>)}
+              </ul>
+            </details>
+          )}
+        </div>
+      )}
     </div>
   );
 }

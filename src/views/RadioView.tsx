@@ -81,12 +81,27 @@ export default function RadioView() {
       else if (mode === 'tag' && tag) list = await window.mp.radio.byTag(tag, 100);
       else if (mode === 'country' && country) list = await window.mp.radio.byCountry(country, 100);
       // Always present stations A→Z regardless of mode. Radio-Browser returns
-      // them in vote/click order; the user asked for alphabetical so the list
-      // is predictable and scannable. `localeCompare` with numeric + base
-      // sensitivity handles accents + station names that start with numbers
-      // (e.g. "1.FM" before "ABC Radio").
+      // them in vote/click order, which shuffles every refresh and makes the
+      // list hard to scan — especially in search where people are visually
+      // hunting for a specific station name.
+      //
+      // Sort-key normalisation matters more than you'd think here. Stations
+      // are crowd-submitted, so names routinely come back with:
+      //   - leading/trailing whitespace   ("  KEXP  ")
+      //   - decorative prefixes           (".977 Country", "!Rock FM", "*CKLN*")
+      //   - quote wrappers                (`"Jazz 24"`)
+      //   - mixed case                    ("abc radio" next to "ABC RADIO")
+      //
+      // Naïvely comparing `a.name` vs `b.name` puts all the punctuation-
+      // prefixed ones at the top (because '.' < 'A' in Unicode) which feels
+      // wrong. The sort key below trims whitespace, strips a leading run of
+      // non-letters/non-digits, and lowercases — so "ABC Radio" lands where
+      // a user expects it regardless of decorations on neighbouring stations.
+      // `numeric: true` still keeps "2.FM" before "10.FM".
+      const sortKey = (name: string | null | undefined) =>
+        (name || '').trim().replace(/^[^\p{L}\p{N}]+/u, '').toLowerCase();
       list = [...list].sort((a, b) =>
-        (a.name || '').localeCompare(b.name || '', undefined, { sensitivity: 'base', numeric: true })
+        sortKey(a.name).localeCompare(sortKey(b.name), undefined, { sensitivity: 'base', numeric: true })
       );
       setStations(list);
     } catch (e: any) {

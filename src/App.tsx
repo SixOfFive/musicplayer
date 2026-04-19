@@ -22,6 +22,11 @@ import Settings from './views/Settings';
 import Visualizer from './views/Visualizer';
 import { useLibrary } from './store/library';
 import { usePlayer } from './store/player';
+// Side-effect import: wires the global IPC listener for convert:progress
+// events so the Shrink-album progress bar survives navigation. Importing
+// here (instead of relying on ShrinkAlbumButton to pull it in first)
+// guarantees the subscription is live for the entire app lifetime.
+import './store/convert';
 
 export default function App() {
   const refreshPlaylists = useLibrary((s) => s.refreshPlaylists);

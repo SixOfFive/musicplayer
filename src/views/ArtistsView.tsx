@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useLibraryRefresh } from '../hooks/useLibraryRefresh';
 import ScanProgressPanel from '../components/ScanProgressPanel';
+import AlphaRail, { firstLetter } from '../components/AlphaRail';
 
 interface ArtistRow {
   id: number;
@@ -54,10 +55,11 @@ export default function ArtistsView() {
 
       <ScanProgressPanel />
 
-      <ul className="divide-y divide-white/5 bg-bg-elev-1/40 rounded">
+      <ul className="divide-y divide-white/5 bg-bg-elev-1/40 rounded pr-6">
         {filtered.map((a) => (
           <li
             key={a.id}
+            data-alpha-letter={firstLetter(a.name)}
             onClick={() => nav(`/artist/${a.id}`)}
             onDoubleClick={() => nav(`/artist/${a.id}`)}
             className="px-4 py-3 text-sm flex justify-between items-center hover:bg-white/5 cursor-pointer"
@@ -76,6 +78,11 @@ export default function ArtistsView() {
           </li>
         )}
       </ul>
+      {/* Rail only when sorted by name — other sorts make the jump-to-letter
+          mapping non-contiguous and the rail less useful. */}
+      {sortBy === 'name' && filtered.length > 0 && (
+        <AlphaRail items={filtered} labelOf={(a: any) => a.name} />
+      )}
     </section>
   );
 }

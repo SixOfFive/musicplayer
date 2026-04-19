@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import { IPC, type TrackQuery, type AlbumQuery, type TrackSort, type AlbumSort, MP3_SIZE_RATIO_VS_FLAC } from '../../shared/types';
 import { getDb } from '../services/db';
 import { getSettings } from '../services/settings-store';
+import { migrateCoverArtToAlbumFolders } from '../services/cover-art';
 
 const TRACK_SORT_COL: Record<TrackSort, string> = {
   title: 't.title',
@@ -256,6 +257,17 @@ export function registerLibraryIpc(ipcMain: IpcMain, _getWin: () => BrowserWindo
       ORDER BY bytes DESC
       LIMIT ?
     `).all(n);
+  });
+
+  /**
+   * One-shot migration: relocate every cover art file currently in the app
+   * cache dir INTO the album's music folder, and update album rows to point
+   * at the new location. Called either from a Settings button, or
+   * automatically when the user flips coverArtStorage from 'cache' to
+   * 'album-folder'. Idempotent — safe to run anytime.
+   */
+  ipcMain.handle(IPC.LIBRARY_MIGRATE_COVER_ART, async () => {
+    return migrateCoverArtToAlbumFolders();
   });
 
   ipcMain.handle(IPC.PLAYBACK_FILE_URL, (_e, p: string) => {

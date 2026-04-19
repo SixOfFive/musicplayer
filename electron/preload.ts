@@ -24,10 +24,12 @@ const api = {
     album: (id: number) => ipcRenderer.invoke(IPC.LIBRARY_ALBUM, id),
     search: (q: string) => ipcRenderer.invoke(IPC.LIBRARY_SEARCH, q),
     largestAlbums: (limit?: number) => ipcRenderer.invoke(IPC.LIBRARY_LARGEST_ALBUMS, limit ?? 25),
+    migrateCoverArt: () => ipcRenderer.invoke(IPC.LIBRARY_MIGRATE_COVER_ART),
     fileUrl: (p: string) => ipcRenderer.invoke(IPC.PLAYBACK_FILE_URL, p),
   },
   scan: {
     start: () => ipcRenderer.invoke(IPC.SCAN_START),
+    album: (albumId: number) => ipcRenderer.invoke(IPC.SCAN_ALBUM, albumId),
     cancel: () => ipcRenderer.invoke(IPC.SCAN_CANCEL),
     onProgress: (cb: (p: unknown) => void) => {
       const listener = (_: unknown, payload: unknown) => cb(payload);

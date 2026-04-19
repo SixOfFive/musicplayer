@@ -6,6 +6,7 @@ import { getDb } from '../services/db';
 import { getSettings } from '../services/settings-store';
 import { fetchAlbumArt, persistAlbumArt } from '../services/metadata-providers';
 import { saveAlbumArt } from '../services/cover-art';
+import { exportAllPlaylists } from '../services/playlist-export';
 
 // Set by main.ts once the window exists. Lets services outside the IPC
 // registration closure (e.g. the startup resume) post scan:progress events.
@@ -134,6 +135,10 @@ export function registerScanIpc(ipcMain: IpcMain, getWin: () => BrowserWindow | 
     getWin()?.webContents.send(IPC.SCAN_PROGRESS, payload);
   };
 
+  ipcMain.handle(IPC.SCAN_ALBUM, async (_e, albumId: number) => {
+    return rescanAlbum(Number(albumId));
+  });
+
   ipcMain.handle(IPC.SCAN_CANCEL, () => {
     cancelled = true;
     artCancelled = true;
@@ -150,12 +155,13 @@ export function registerScanIpc(ipcMain: IpcMain, getWin: () => BrowserWindow | 
       const exts = new Set(settings.scan.extensions.map((e) => e.toLowerCase()));
       const dirs = getDb().prepare('SELECT id, path FROM directories WHERE enabled = 1').all() as Array<{ id: number; path: string }>;
 
-      // A user-initiated rescan should give previously-failed album art
-      // another shot against the online providers. (Startup resume keeps the
-      // flag so we don't hammer MB every launch for genuinely obscure releases.)
-      if (settings.scan.fetchCoverArt && settings.scan.providers.length > 0) {
-        getDb().prepare('UPDATE albums SET art_lookup_failed = 0 WHERE cover_art_path IS NULL').run();
-      }
+      // Previously-failed album art is NOT auto-retried on rescan anymore.
+      // The lookup hits MB / Cover Art Archive / Deezer and is rate-limited +
+      // slow; hammering them every scan for albums that aren't in their
+      // databases wastes time and annoys the free-tier providers. If a user
+      // wants to re-try a specific album they can hit the "Fetch cover art"
+      // button on the album page, which calls `fetchArtForAlbum(id)` and
+      // bypasses the `art_lookup_failed` gate for that one album only.
 
       send({ phase: 'enumerating', filesSeen: 0, filesProcessed: 0, bytesSeen: 0, bytesProcessed: 0, currentFile: null, message: 'Scanning folders…' });
 
@@ -446,6 +452,293 @@ export async function runArtFetch(touchedIds: number[]): Promise<void> {
     artInProgress = false;
     artState = { albumsTotal: 0, albumsDone: 0, currentAlbum: null };
   }
+}
+
+/**
+ * Fetch cover art for ONE album, triggered manually by the user (e.g. the
+ * "Fetch cover art" button on the album page). Bypasses the
+ * `art_lookup_failed` gate that normally prevents re-trying providers on
+ * rescans, because this is an explicit user request — if they clicked the
+ * button, they want us to try again even if we failed before.
+ *
+ * Does nothing and returns false if the album already has cover art (the
+ * caller should decide whether to force-replace; this function won't
+ * overwrite existing art).
+ *
+ * Returns true if new cover art was persisted, false if no provider had
+ * anything for this album or the album isn't a candidate.
+ */
+export async function fetchArtForAlbum(albumId: number): Promise<boolean> {
+  const settings = getSettings();
+  if (!settings.scan.fetchCoverArt || settings.scan.providers.length === 0) {
+    return false;
+  }
+
+  const db = getDb();
+  const row = db.prepare(`
+    SELECT al.id, al.title, al.cover_art_path AS coverArtPath, ar.name AS artist
+    FROM albums al LEFT JOIN artists ar ON ar.id = al.artist_id
+    WHERE al.id = ?
+  `).get(albumId) as { id: number; title: string; coverArtPath: string | null; artist: string | null } | undefined;
+
+  if (!row) return false;
+  if (row.coverArtPath) return false; // already has art — don't overwrite
+
+  const mark = db.prepare('UPDATE albums SET art_lookup_at = ?, art_lookup_failed = ? WHERE id = ?');
+  try {
+    const art = await fetchAlbumArt(row.artist, row.title, settings.scan.providers);
+    if (art) {
+      await persistAlbumArt(row.id, art);
+      mark.run(Date.now(), 0, row.id);
+      // Let the renderer know so any visible Album / Albums view refreshes.
+      emit({
+        phase: 'done',
+        filesSeen: 1, filesProcessed: 1, bytesSeen: 0, bytesProcessed: 0,
+        currentFile: `${row.artist ?? '?'} — ${row.title}`,
+        message: 'album-art-landed',
+        art: null,
+      });
+      return true;
+    }
+    mark.run(Date.now(), 1, row.id);
+    return false;
+  } catch {
+    mark.run(Date.now(), 1, row.id);
+    return false;
+  }
+}
+
+export interface RescanAlbumResult {
+  ok: boolean;
+  added: number;
+  updated: number;
+  removed: number;
+  errors: number;
+  message: string;
+  albumDeleted: boolean; // true when the last track was removed → album row dropped
+}
+
+/**
+ * Rescan a single album — narrow, fast version of the full library scan.
+ *
+ * Walks every folder that currently contains a track of this album (usually
+ * just one, but multi-disc sets sometimes span /CD1/, /CD2/), then:
+ *
+ *   - Re-parses tags on every audio file in those folders and upserts the
+ *     track row (so retags / bitrate changes propagate).
+ *   - Picks up tracks that were added to the folder after the original scan.
+ *   - Removes track rows whose files no longer exist on disk.
+ *   - If the album ends up with zero tracks, drops the album row too (and
+ *     its cover art cache entry).
+ *
+ * Does NOT recurse into subfolders — we don't want a rescan of "/Artist/
+ * OK Computer/" to also slurp "/Artist/The Bends/" if the user accidentally
+ * put both albums in the same parent. One folder per disk only.
+ *
+ * Runs against the same `inProgress` lock as the full scan so we never
+ * double-read files while a big scan is running.
+ */
+export async function rescanAlbum(albumId: number): Promise<RescanAlbumResult> {
+  if (inProgress) {
+    return { ok: false, added: 0, updated: 0, removed: 0, errors: 0, albumDeleted: false,
+             message: 'A scan is already running. Please wait for it to finish.' };
+  }
+  inProgress = true;
+  cancelled = false;
+
+  const summary: RescanAlbumResult = {
+    ok: true, added: 0, updated: 0, removed: 0, errors: 0, albumDeleted: false, message: '',
+  };
+
+  try {
+    const settings = getSettings();
+    const db = getDb();
+    const exts = new Set(settings.scan.extensions.map((e) => e.toLowerCase()));
+
+    // Existing tracks + their folder(s) for this album.
+    const existing = db
+      .prepare('SELECT id, path FROM tracks WHERE album_id = ?')
+      .all(albumId) as Array<{ id: number; path: string }>;
+
+    if (existing.length === 0) {
+      summary.ok = false;
+      summary.message = 'Album has no tracks — nothing to rescan.';
+      return summary;
+    }
+
+    const folders = Array.from(new Set(existing.map((t) => path.dirname(t.path))));
+    const knownPaths = new Set(existing.map((t) => t.path));
+
+    // Scan each folder non-recursively. Collect disk-present audio files.
+    const foundPaths: string[] = [];
+    for (const folder of folders) {
+      try {
+        const entries = await fs.readdir(folder, { withFileTypes: true });
+        for (const e of entries) {
+          if (!e.isFile()) continue;
+          const full = path.join(folder, e.name);
+          if (exts.has(path.extname(full).toLowerCase())) foundPaths.push(full);
+        }
+      } catch (err: any) {
+        // Folder unreachable (network share offline, dir deleted, perms) —
+        // treat its tracks as absent; they'll get removed below.
+        console.error(`[rescan-album ${albumId}] can't read folder ${folder}:`, err?.code ?? '', err?.message ?? err);
+        summary.errors++;
+      }
+    }
+    const foundSet = new Set(foundPaths);
+
+    emit({
+      phase: 'reading-tags',
+      filesSeen: foundPaths.length, filesProcessed: 0,
+      bytesSeen: 0, bytesProcessed: 0,
+      currentFile: null,
+      message: `Rescanning ${foundPaths.length} file${foundPaths.length === 1 ? '' : 's'}…`,
+      art: null,
+    });
+
+    // Reuse the same upsert statement the main scan uses.
+    const insert = db.prepare(`
+      INSERT INTO tracks (path, title, artist_id, album_id, album_artist, track_no, disc_no,
+                          year, genre, duration_sec, bitrate, sample_rate, codec, mtime, size, date_added)
+      VALUES (@path, @title, @artist_id, @album_id, @album_artist, @track_no, @disc_no,
+              @year, @genre, @duration_sec, @bitrate, @sample_rate, @codec, @mtime, @size, @date_added)
+      ON CONFLICT(path) DO UPDATE SET
+        title = excluded.title,
+        artist_id = excluded.artist_id,
+        album_id = excluded.album_id,
+        album_artist = excluded.album_artist,
+        track_no = excluded.track_no,
+        disc_no = excluded.disc_no,
+        year = excluded.year,
+        genre = excluded.genre,
+        duration_sec = excluded.duration_sec,
+        bitrate = excluded.bitrate,
+        sample_rate = excluded.sample_rate,
+        codec = excluded.codec,
+        mtime = excluded.mtime,
+        size = excluded.size
+    `);
+
+    let processed = 0;
+    for (const f of foundPaths) {
+      if (cancelled) break;
+      try {
+        const stat = await fs.stat(f);
+        const parseFile = await getParseFile();
+        const md = await parseFile(f, { duration: true, skipCovers: false });
+        const artistId = upsertArtist(md.common.artist ?? null);
+        const genreTag = (md.common.genre ?? [])[0] ?? null;
+        const derivedAlbumId = upsertAlbum(md.common.album ?? null, artistId, md.common.year ?? null, genreTag);
+        const isNew = !knownPaths.has(f);
+        insert.run({
+          path: f,
+          title: md.common.title ?? path.basename(f),
+          artist_id: artistId,
+          album_id: derivedAlbumId,
+          album_artist: md.common.albumartist ?? null,
+          track_no: md.common.track?.no ?? null,
+          disc_no: md.common.disk?.no ?? null,
+          year: md.common.year ?? null,
+          genre: genreTag,
+          duration_sec: md.format.duration ?? null,
+          bitrate: md.format.bitrate ?? null,
+          sample_rate: md.format.sampleRate ?? null,
+          codec: md.format.codec ?? null,
+          mtime: Math.floor(stat.mtimeMs),
+          size: stat.size,
+          date_added: isNew ? Date.now() : Date.now(), // keep simple — existing rows ignore this column
+        });
+        if (isNew) summary.added++;
+        else summary.updated++;
+
+        // Save embedded cover art if this album still lacks one (typically
+        // because the album was newly created by this very rescan).
+        if (derivedAlbumId && settings.scan.fetchCoverArt) {
+          const row = db.prepare('SELECT cover_art_path FROM albums WHERE id = ?').get(derivedAlbumId) as { cover_art_path: string | null } | undefined;
+          if (!row?.cover_art_path && md.common.picture && md.common.picture[0]) {
+            await saveEmbeddedCoverArt(derivedAlbumId, md.common.picture[0]);
+            db.prepare('UPDATE albums SET art_lookup_failed = 0 WHERE id = ?').run(derivedAlbumId);
+          }
+        }
+      } catch (err: any) {
+        console.error(`[rescan-album ${albumId}] failed on ${f}:`, err?.code ?? '', err?.message ?? err);
+        summary.errors++;
+      }
+      processed++;
+      emit({
+        phase: 'reading-tags',
+        filesSeen: foundPaths.length, filesProcessed: processed,
+        bytesSeen: 0, bytesProcessed: 0,
+        currentFile: path.basename(f), message: null,
+        art: null,
+      });
+    }
+
+    // Remove rows whose files are gone from disk. The schema has
+    // `ON DELETE CASCADE` on every tracks.id reference — track_likes,
+    // playlist_tracks, track_plays_summary, play_events — so the single
+    // DELETE here also scrubs: liked-song entries, membership in every
+    // playlist that contained this track, the play-count rollup, and all
+    // historical play_event rows for this track. (SQLite cascades only fire
+    // when `PRAGMA foreign_keys = ON`, which db.ts sets per connection.)
+    const toRemove = existing.filter((t) => !foundSet.has(t.path));
+    if (toRemove.length > 0) {
+      const del = db.prepare('DELETE FROM tracks WHERE id = ?');
+      for (const t of toRemove) {
+        del.run(t.id);
+        summary.removed++;
+      }
+
+      // After removals the .m3u8 playlist files on disk are stale — they
+      // still list the deleted track paths. Re-export everything so the
+      // exports agree with the DB again. Best-effort: swallow errors so a
+      // failed export doesn't turn a successful rescan into a failure.
+      try {
+        await exportAllPlaylists();
+      } catch (err: any) {
+        console.error(`[rescan-album ${albumId}] playlist re-export failed after removals:`, err?.message ?? err);
+      }
+    }
+
+    // If nothing's left in this album, drop the album row so it stops
+    // showing up in library views.
+    const remaining = db.prepare('SELECT COUNT(*) AS c FROM tracks WHERE album_id = ?').get(albumId) as { c: number };
+    if (remaining.c === 0) {
+      db.prepare('DELETE FROM albums WHERE id = ?').run(albumId);
+      summary.albumDeleted = true;
+    }
+
+    const parts: string[] = [];
+    if (summary.added) parts.push(`${summary.added} added`);
+    if (summary.updated) parts.push(`${summary.updated} updated`);
+    if (summary.removed) parts.push(`${summary.removed} removed`);
+    if (summary.errors) parts.push(`${summary.errors} errored`);
+    summary.message = parts.length ? parts.join(', ') : 'No changes.';
+    if (summary.albumDeleted) summary.message += ' Album is now empty and has been removed.';
+
+    emit({
+      phase: 'done',
+      filesSeen: foundPaths.length, filesProcessed: processed,
+      bytesSeen: 0, bytesProcessed: 0,
+      currentFile: null,
+      message: `Album rescan: ${summary.message}`,
+      art: null,
+    });
+  } catch (err: any) {
+    summary.ok = false;
+    summary.message = err?.message ?? String(err);
+    emit({
+      phase: 'error',
+      filesSeen: 0, filesProcessed: 0, bytesSeen: 0, bytesProcessed: 0,
+      currentFile: null, message: `Rescan failed: ${summary.message}`,
+      art: null,
+    });
+  } finally {
+    inProgress = false;
+  }
+
+  return summary;
 }
 
 /**

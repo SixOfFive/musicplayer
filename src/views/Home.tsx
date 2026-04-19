@@ -16,9 +16,16 @@ function greeting() {
   return 'Good evening';
 }
 
+// How many newest-album tiles to show when the section is collapsed vs
+// expanded. 12 fills two rows at xl width; 96 is a generous "see my whole
+// recent crop" view — eight times as many without being overwhelming.
+const NEWEST_COLLAPSED = 12;
+const NEWEST_EXPANDED = 96;
+
 export default function Home() {
   const [albums, setAlbums] = useState<any[]>([]);
   const [stats, setStats] = useState<LibraryStats | null>(null);
+  const [newestExpanded, setNewestExpanded] = useState(false);
   const play = usePlayer((s) => s.play);
   const nav = useNavigate();
 
@@ -44,7 +51,10 @@ export default function Home() {
   }
 
   const load = useCallback(() => {
-    window.mp.library.albums({ limit: 12, sortBy: 'date_added', sortDir: 'desc' }).then(setAlbums);
+    // Always fetch the expanded count from the backend — it's cheap (a single
+    // indexed SELECT) and lets the "Show more" toggle flip instantly without
+    // a round-trip. Slicing happens in the render.
+    window.mp.library.albums({ limit: NEWEST_EXPANDED, sortBy: 'date_added', sortDir: 'desc' }).then(setAlbums);
     window.mp.library.stats().then(setStats);
   }, []);
   useEffect(() => { load(); }, [load]);
@@ -85,12 +95,32 @@ export default function Home() {
         </div>
       )}
 
-      {/* Albums grid */}
-      {hasLibrary && (
+      {/* Albums grid. Shows 12 most-recent tiles by default; click "Show more"
+          to expand up to 96. Toggle button is next to the heading so it's
+          discoverable without scrolling. If the backend returned fewer than
+          the collapsed count, we don't bother showing the toggle. */}
+      {hasLibrary && albums.length > 0 && (
         <div className="mb-8">
-          <h2 className="text-xl font-semibold mb-3">Newest albums</h2>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-xl font-semibold">Newest albums</h2>
+            {albums.length > NEWEST_COLLAPSED && (
+              <button
+                onClick={() => setNewestExpanded((v) => !v)}
+                className="text-xs text-text-muted hover:text-text-primary transition inline-flex items-center gap-1"
+                title={newestExpanded ? 'Collapse to the 12 most recent' : `Show up to ${NEWEST_EXPANDED} recent albums`}
+              >
+                {newestExpanded ? (
+                  <>Show less ▴</>
+                ) : (
+                  <>Show more ({Math.min(albums.length, NEWEST_EXPANDED)}) ▾</>
+                )}
+              </button>
+            )}
+          </div>
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-4">
-            {albums.map((a) => <AlbumCard key={a.id} album={a} />)}
+            {albums.slice(0, newestExpanded ? NEWEST_EXPANDED : NEWEST_COLLAPSED).map((a) => (
+              <AlbumCard key={a.id} album={a} />
+            ))}
           </div>
         </div>
       )}

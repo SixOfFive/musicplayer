@@ -1,6 +1,7 @@
 import { useNavigate } from 'react-router-dom';
 import { usePlayer } from '../store/player';
 import { mediaUrl } from '../lib/mediaUrl';
+import { firstLetter } from './AlphaRail';
 
 interface Props {
   album: {
@@ -46,6 +47,10 @@ export default function AlbumCard({ album, minSavingsPercent = 5 }: Props) {
   return (
     <div
       onClick={() => nav(`/album/${album.id}`)}
+      // `data-alpha-letter` lets AlphaRail jump to the start of each letter's
+      // section via querySelector, without needing a ref per card. Safe to
+      // add unconditionally — the browser ignores unrecognised data-attrs.
+      data-alpha-letter={firstLetter(album.title)}
       className="group relative bg-bg-elev-1 hover:bg-bg-elev-2 p-3 rounded cursor-pointer transition"
     >
       <div className="relative aspect-square w-full mb-2">

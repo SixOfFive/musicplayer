@@ -1,6 +1,19 @@
-import { useEffect, useState } from 'react';
-import type { ConvertProgress } from '../../shared/types';
+import { useEffect, useRef, useState } from 'react';
 import { formatBytes } from '../hooks/useScanProgress';
+import { useConvert } from '../store/convert';
+
+/**
+ * Format a second count as "m:ss" — consistent with how the scrubber renders
+ * track time. Guards against NaN / negatives / Infinity; returns `null` so
+ * callers can decide to hide the display instead of showing "--:--".
+ */
+function fmtEta(sec: number): string | null {
+  if (!Number.isFinite(sec) || sec <= 0) return null;
+  const s = Math.round(sec);
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return `${m}:${r.toString().padStart(2, '0')}`;
+}
 
 interface Props {
   albumId: number;
@@ -10,13 +23,23 @@ interface Props {
 }
 
 /**
- * Button that offers to convert all FLAC tracks on an album to MP3 (archival V0
- * by default, set in Settings) and remove the originals after verification.
+ * Compact "Shrink album" button. Converts all FLAC tracks on an album to MP3
+ * (quality picked in Settings) and removes the originals after verification.
  *
- * Runs through the convert:* IPC family. Progress events draw an inline bar.
+ * Progress state lives in the `useConvert` zustand store, NOT in this
+ * component — so navigating away and back keeps the live progress bar in
+ * sync with the main-process worker. The bar is a single line to fit the
+ * user's "quick glance" goal.
+ *
+ * The button disappears once conversion succeeds: the library refresh event
+ * fires after completion, the parent re-fetches tracks, `flacCount` drops
+ * to 0, and the early-return at the top kills the render.
  */
 export default function ShrinkAlbumButton({ albumId, albumTitle, flacCount, bytes }: Props) {
-  const [progress, setProgress] = useState<ConvertProgress | null>(null);
+  const progress = useConvert((s) => s.byAlbum.get(albumId) ?? null);
+  const startedAt = useConvert((s) => s.startedAt.get(albumId) ?? null);
+  const clear = useConvert((s) => s.clear);
+
   const [confirming, setConfirming] = useState(false);
   const [available, setAvailable] = useState(true);
   const isBusy = progress != null &&
@@ -24,27 +47,41 @@ export default function ShrinkAlbumButton({ albumId, albumTitle, flacCount, byte
 
   useEffect(() => {
     window.mp.convert.checkAvailable().then((r: any) => setAvailable(!!r?.available));
-    const off = window.mp.convert.onProgress((p: any) => {
-      // Only reflect progress for OUR album (other buttons might be mounted).
-      if (p?.albumId === albumId) setProgress(p);
-    });
-    return () => { off?.(); };
-  }, [albumId]);
+  }, []);
+
+  // Auto-clear terminal states after a grace period so the store doesn't
+  // leak Map entries over time. The `done` flash stays visible for ~3s so
+  // the user sees the saved-bytes callout before the library refresh
+  // unmounts the button.
+  const clearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!progress) return;
+    if (progress.phase === 'done' || progress.phase === 'error') {
+      if (clearTimerRef.current) clearTimeout(clearTimerRef.current);
+      clearTimerRef.current = setTimeout(() => clear(albumId), 4000);
+    }
+    return () => {
+      if (clearTimerRef.current) { clearTimeout(clearTimerRef.current); clearTimerRef.current = null; }
+    };
+  }, [progress, albumId, clear]);
 
   async function start() {
     setConfirming(false);
-    setProgress({
+    // Seed the store with a 'starting' snapshot so ALL mounted buttons for
+    // this album show progress immediately, before the first IPC event.
+    useConvert.getState().setProgress({
       phase: 'starting', albumId, tracksTotal: flacCount, tracksDone: 0,
       currentFile: null, bytesBefore: bytes, bytesAfter: 0, message: 'Starting…',
     });
     const res: any = await window.mp.convert.albumToMp3(albumId);
     if (res?.ok === false && res?.error) {
-      setProgress({
+      useConvert.getState().setProgress({
         phase: 'error', albumId, tracksTotal: flacCount, tracksDone: 0,
         currentFile: null, bytesBefore: bytes, bytesAfter: 0, message: res.error,
       });
     }
     // Fire library refresh so lists update with new codec/sizes/paths.
+    // The album view remounts with flacCount=0 and this button disappears.
     window.dispatchEvent(new CustomEvent('mp-library-changed'));
   }
 
@@ -52,7 +89,7 @@ export default function ShrinkAlbumButton({ albumId, albumTitle, flacCount, byte
 
   return (
     <div className="inline-flex flex-col items-start gap-2">
-      {!isBusy && (
+      {!isBusy && !progress && (
         <button
           onClick={() => setConfirming(true)}
           disabled={!available}
@@ -78,40 +115,99 @@ export default function ShrinkAlbumButton({ albumId, albumTitle, flacCount, byte
         </div>
       )}
 
-      {progress && (progress.phase === 'starting' || progress.phase === 'converting' || progress.phase === 'verifying' || progress.phase === 'removing-originals') && (
-        <ProgressBar p={progress} onCancel={() => window.mp.convert.cancel()} />
-      )}
+      {isBusy && progress && <CompactProgress p={progress} startedAt={startedAt} onCancel={() => window.mp.convert.cancel()} />}
 
       {progress?.phase === 'done' && (
-        <div className="mt-1 text-xs text-accent">✓ {progress.message ?? `Saved ${formatBytes(progress.bytesBefore - progress.bytesAfter)}`}</div>
+        <div className="inline-flex items-center gap-2 text-xs text-accent bg-accent/10 border border-accent/30 rounded-full px-3 py-1">
+          <span>✓</span>
+          <span>Saved {formatBytes(Math.max(0, progress.bytesBefore - progress.bytesAfter))}</span>
+        </div>
       )}
       {progress?.phase === 'error' && (
-        <div className="mt-1 text-xs text-red-400">✗ {progress.message ?? 'Failed'}</div>
+        <div className="inline-flex items-center gap-2 text-xs text-red-400 bg-red-500/10 border border-red-500/30 rounded-full px-3 py-1">
+          <span>✗</span>
+          <span className="truncate max-w-xs" title={progress.message ?? 'Failed'}>{progress.message ?? 'Failed'}</span>
+        </div>
       )}
     </div>
   );
 }
 
-function ProgressBar({ p, onCancel }: { p: ConvertProgress; onCancel: () => void }) {
+/**
+ * Single-line conversion indicator. Designed to be glance-able: spinner,
+ * tiny track counter, 48px bar, ETA, cancel ✕. Fits in about 240px.
+ *
+ * ETA is derived from throughput: (tracksRemaining * elapsed / tracksDone).
+ * This assumes roughly-equal-sized tracks — fine for most albums, slightly
+ * off for compilations where a 9-minute epic mixes with 2-minute cuts.
+ * We re-render every 1s via the local `tick` so the countdown updates
+ * even when no new IPC progress event is flowing (e.g. partway through
+ * a long track).
+ */
+function CompactProgress({
+  p, startedAt, onCancel,
+}: {
+  p: import('../../shared/types').ConvertProgress;
+  startedAt: number | null;
+  onCancel: () => void;
+}) {
   const pct = p.tracksTotal > 0 ? Math.round((p.tracksDone / p.tracksTotal) * 100) : 0;
-  const label = {
-    starting: 'Starting…',
-    converting: `Encoding track ${p.tracksDone + 1} / ${p.tracksTotal}`,
-    verifying: 'Verifying outputs…',
-    'removing-originals': 'Removing FLAC originals…',
-  }[p.phase as 'starting' | 'converting' | 'verifying' | 'removing-originals'] ?? p.phase;
+
+  // 1-second ticker so the ETA "ticks down" between actual progress events.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Compute ETA from elapsed wall time vs tracks completed.
+  let etaStr: string | null = null;
+  if (startedAt && p.tracksDone >= 1 && p.tracksTotal > p.tracksDone && p.phase === 'converting') {
+    const elapsedSec = (Date.now() - startedAt) / 1000;
+    const secPerTrack = elapsedSec / p.tracksDone;
+    const remainingSec = secPerTrack * (p.tracksTotal - p.tracksDone);
+    etaStr = fmtEta(remainingSec);
+  }
+
+  // Phase-specific short verb. "Shrinking" is friendlier than "Encoding".
+  const verb =
+    p.phase === 'starting' ? 'Starting'
+    : p.phase === 'converting' ? 'Shrinking'
+    : p.phase === 'verifying' ? 'Verifying'
+    : p.phase === 'removing-originals' ? 'Cleaning up'
+    : p.phase;
+
+  // Long-form title used for hover so the one-line readout doesn't drop
+  // information the power user might want.
+  const fullTitle = [
+    `${verb} ${p.tracksDone}/${p.tracksTotal} tracks (${pct}%)`,
+    etaStr ? `~${etaStr} remaining` : null,
+    p.currentFile ? `Current: ${p.currentFile}` : null,
+    p.message ? p.message : null,
+  ].filter(Boolean).join('\n');
 
   return (
-    <div className="mt-1 bg-bg-elev-2 border border-white/10 rounded p-2 text-xs w-80">
-      <div className="flex items-center gap-2">
-        <div className="w-3 h-3 border-2 border-accent border-t-transparent rounded-full animate-spin" />
-        <span className="flex-1">{label}</span>
-        <button onClick={onCancel} className="text-text-muted hover:text-white">Cancel</button>
-      </div>
-      <div className="h-1 bg-black/40 rounded mt-2 overflow-hidden">
+    <div
+      className="inline-flex items-center gap-2 text-xs bg-bg-elev-2 border border-white/10 rounded-full px-3 py-1"
+      title={fullTitle}
+    >
+      <div className="w-3 h-3 border-2 border-accent border-t-transparent rounded-full animate-spin flex-shrink-0" />
+      <span className="tabular-nums">{verb} {p.tracksDone}/{p.tracksTotal}</span>
+      <div className="h-1 w-12 bg-black/40 rounded-full overflow-hidden flex-shrink-0">
         <div className="h-full bg-accent transition-all duration-200" style={{ width: `${pct}%` }} />
       </div>
-      {p.currentFile && <div className="text-[10px] text-text-muted truncate mt-1">{p.currentFile}</div>}
+      <span className="tabular-nums text-text-muted">{pct}%</span>
+      {etaStr && (
+        <span className="tabular-nums text-text-muted" title="Estimated time remaining">~{etaStr}</span>
+      )}
+      <button
+        onClick={onCancel}
+        className="text-text-muted hover:text-white ml-1"
+        title="Cancel conversion"
+        aria-label="Cancel conversion"
+      >
+        ✕
+      </button>
     </div>
   );
 }

@@ -258,6 +258,7 @@ export const IPC = {
   SCAN_START: 'scan:start',
   SCAN_CANCEL: 'scan:cancel',
   SCAN_PROGRESS: 'scan:progress', // main -> renderer event
+  SCAN_ALBUM: 'scan:album',
   // Library queries
   LIBRARY_TRACKS: 'library:tracks',
   LIBRARY_ALBUMS: 'library:albums',
@@ -266,6 +267,7 @@ export const IPC = {
   LIBRARY_ALBUM: 'library:album',
   LIBRARY_SEARCH: 'library:search',
   LIBRARY_LARGEST_ALBUMS: 'library:largest-albums',
+  LIBRARY_MIGRATE_COVER_ART: 'library:migrate-cover-art',
   // Playback helpers
   PLAYBACK_FILE_URL: 'playback:file-url',
   // Visualizer plugins

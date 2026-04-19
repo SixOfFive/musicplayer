@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import TrackRow, { type RowTrack } from '../components/TrackRow';
 import { usePlayer } from '../store/player';
 import { useLibraryRefresh } from '../hooks/useLibraryRefresh';
@@ -20,8 +20,10 @@ interface AlbumMeta {
 export default function AlbumView() {
   const { id } = useParams();
   const aid = Number(id);
+  const nav = useNavigate();
   const [album, setAlbum] = useState<AlbumMeta | null>(null);
   const [tracks, setTracks] = useState<RowTrack[]>([]);
+  const [rescan, setRescan] = useState<null | { running: boolean; result?: { added: number; updated: number; removed: number; errors: number; message: string; albumDeleted: boolean } }>(null);
   const play = usePlayer((s) => s.play);
 
   const load = useCallback(() => {
@@ -33,6 +35,33 @@ export default function AlbumView() {
 
   useEffect(() => { load(); }, [load]);
   useLibraryRefresh(load);
+
+  /**
+   * Re-scan just this album's folder(s): re-read tags on every audio file,
+   * pick up new tracks that were dropped in, and remove rows for files that
+   * have been deleted. Cheaper than a whole-library scan. Button is in the
+   * action row next to Play / Shrink.
+   */
+  async function runRescan() {
+    setRescan({ running: true });
+    try {
+      const result = await (window.mp.scan as any).album(aid);
+      setRescan({ running: false, result });
+      if (result?.albumDeleted) {
+        // Every track got removed — no album to show anymore. Kick the user
+        // back to the album grid rather than leave them on a 404-in-progress.
+        window.dispatchEvent(new CustomEvent('mp-library-changed'));
+        setTimeout(() => nav('/albums'), 1500);
+      } else {
+        // Re-fetch album + tracks so the UI reflects new metadata, added/
+        // removed tracks, etc.
+        load();
+        window.dispatchEvent(new CustomEvent('mp-library-changed'));
+      }
+    } catch (err: any) {
+      setRescan({ running: false, result: { added: 0, updated: 0, removed: 0, errors: 1, message: err?.message ?? 'Rescan failed', albumDeleted: false } });
+    }
+  }
 
   function playAll(startIndex = 0) {
     if (tracks.length === 0) return;
@@ -81,6 +110,29 @@ export default function AlbumView() {
           className="w-14 h-14 rounded-full bg-accent hover:bg-accent-hover hover:scale-105 transition text-black flex items-center justify-center text-2xl font-bold shadow-lg"
           title="Play album"
         >▶</button>
+
+        <div className="flex flex-col gap-1">
+          <button
+            onClick={runRescan}
+            disabled={rescan?.running}
+            className="px-4 py-1.5 rounded-full bg-white/10 hover:bg-white/20 text-sm inline-flex items-center gap-2 disabled:opacity-50"
+            title="Re-read tags on every file in this album's folder, pick up new tracks, and remove entries for deleted files"
+          >
+            {rescan?.running ? (
+              <>
+                <span className="w-3 h-3 border-2 border-accent border-t-transparent rounded-full animate-spin" />
+                Rescanning…
+              </>
+            ) : (
+              <>↻ Rescan album</>
+            )}
+          </button>
+          {rescan?.result && (
+            <div className={`text-[10px] ${rescan.result.errors > 0 ? 'text-red-400' : 'text-text-muted'}`}>
+              {rescan.result.message}
+            </div>
+          )}
+        </div>
 
         {(() => {
           const flacCount = tracks.filter((t) => /\.flac$/i.test(t.path)).length;
