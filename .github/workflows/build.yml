@@ -6,11 +6,18 @@ name: Build installers
 # the right installer from the Releases page and run it.
 
 on:
+  # Tag pushes (vX.Y.Z) produce the public GitHub Release with installers +
+  # latest.yml metadata for electron-updater. That's the "real" CI.
   push:
-    branches: [main]
     tags: ['v*']
+  # Manual trigger is still available for ad-hoc "build the current main"
+  # verification — use the Actions tab → Run workflow. Previously we also
+  # ran on every push to main, but release:patch pushes the commit AND the
+  # tag in quick succession, producing TWO workflow runs and TWO failure
+  # emails when Linux hiccuped. Now there's one run per release.
   workflow_dispatch:
-  pull_request:              # lets us test workflow changes before merging
+  # PR runs still catch regressions in workflow/config changes before merge.
+  pull_request:
 
 jobs:
   build:
