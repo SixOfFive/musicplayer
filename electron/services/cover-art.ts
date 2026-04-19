@@ -235,6 +235,62 @@ export async function findFolderCover(folder: string, preferredBaseName?: string
 }
 
 /**
+ * Reset cover_art_path to NULL for any album whose DB path points into our
+ * local cache directory AND whose file has gone missing. Classic case:
+ * user manually cleaned out the coverart/ folder, or the migration to
+ * album-folders moved files out but something in a prior version left DB
+ * rows pointing at the old cache locations.
+ *
+ * We deliberately restrict the check to paths INSIDE the cache dir. Any
+ * cover_art_path that lives under an actual album folder (shared FS,
+ * user-placed) is assumed stable — checking every network-FS path on
+ * startup would be slow on remote shares, and a missing file there is a
+ * different bug (e.g., someone renamed a folder). Cache paths, by
+ * contrast, are owned by us and are the known stale case.
+ *
+ * After pruning, the subsequent `reclaimFolderCovers()` pass picks up any
+ * existing cover.* file in the album's folder and re-populates
+ * cover_art_path with the real on-disk location. Together they turn a
+ * "library shows broken thumbnails" state into a clean "all covers load"
+ * state without re-downloading anything.
+ */
+export async function pruneMissingCoverArt(): Promise<{ checked: number; pruned: number }> {
+  const db = getDb();
+  const settings = getSettings();
+  const cacheDir = path.resolve(settings.library.coverArtCachePath);
+
+  const rows = db.prepare(`
+    SELECT id, cover_art_path AS coverArtPath FROM albums
+    WHERE cover_art_path IS NOT NULL AND cover_art_path != ''
+  `).all() as Array<{ id: number; coverArtPath: string }>;
+
+  // Also reset art_lookup_failed so the online provider is allowed to
+  // retry later if reclaim doesn't find a folder cover either. Without
+  // this, an album whose cache file vanished AND whose folder has no
+  // on-disk cover would stay permanently blank until the user manually
+  // pokes it.
+  const clearStmt = db.prepare(
+    'UPDATE albums SET cover_art_path = NULL, art_lookup_failed = 0 WHERE id = ?'
+  );
+
+  let checked = 0;
+  let pruned = 0;
+  for (const row of rows) {
+    const p = path.resolve(row.coverArtPath);
+    if (!isInside(p, cacheDir)) continue; // only sweep our own cache dir
+    checked++;
+    try {
+      await fs.access(p);
+    } catch {
+      // ENOENT / EACCES / whatever — treat as missing.
+      clearStmt.run(row.id);
+      pruned++;
+    }
+  }
+  return { checked, pruned };
+}
+
+/**
  * Scan every album with no cover_art_path and probe its folder for an
  * existing cover.* / folder.* / etc. file. Update the DB when one is found.
  *

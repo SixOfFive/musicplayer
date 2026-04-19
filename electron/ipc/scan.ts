@@ -5,7 +5,7 @@ import { IPC, type ScanProgress } from '../../shared/types';
 import { getDb } from '../services/db';
 import { getSettings } from '../services/settings-store';
 import { fetchAlbumArt, persistAlbumArt } from '../services/metadata-providers';
-import { saveAlbumArt, findFolderCover, reclaimFolderCovers } from '../services/cover-art';
+import { saveAlbumArt, findFolderCover, reclaimFolderCovers, pruneMissingCoverArt } from '../services/cover-art';
 import { exportAllPlaylists } from '../services/playlist-export';
 
 // Set by main.ts once the window exists. Lets services outside the IPC
@@ -763,12 +763,25 @@ export async function resumeArtFetchOnStartup(): Promise<void> {
   const settings = getSettings();
   if (!settings.scan.fetchCoverArt || settings.scan.providers.length === 0) return;
 
-  // Before hitting the online providers, probe every NULL-art album's
-  // folder for an existing cover.* / folder.* / front.* / album.* file.
-  // Matters when the music lives on a shared filesystem and another
-  // machine already downloaded the art — we should pick that up for free
-  // instead of re-fetching. Reports a quick summary to stdout so users
-  // tailing the log can see why the art strip didn't do much this time.
+  // Step 1: prune DB rows whose cover_art_path points at a deleted file
+  // in our local cache dir. Without this, the row stays non-NULL and
+  // reclaim skips it (reclaim only acts on NULLs). The renderer renders
+  // a broken-image request per album and floods the log with ENOENTs.
+  try {
+    const r = await pruneMissingCoverArt();
+    if (r.pruned > 0) {
+      console.log(`[startup] pruned ${r.pruned} stale cache cover paths (of ${r.checked} checked) — those albums will be recovered below`);
+    }
+  } catch (err: any) {
+    console.error('[startup] pruneMissingCoverArt failed:', err?.message ?? err);
+  }
+
+  // Step 2: probe every NULL-art album's folder for an existing cover
+  // file placed by another machine / another tool (Jellyfin / Plex /
+  // MusicBee / foobar2000 / Picard). Matters especially when music lives
+  // on a shared filesystem — we should pick up existing art for free
+  // instead of re-downloading. Reports a summary to stdout so someone
+  // tailing the log can see why the online fetcher had little to do.
   try {
     const r = await reclaimFolderCovers();
     if (r.reclaimed > 0) {
