@@ -44,7 +44,18 @@ function defaults(): AppSettings {
       directories: [],
       databasePath: path.join(userData, 'library.db'),
       coverArtCachePath: path.join(userData, 'coverart'),
-      coverArtStorage: 'cache',
+      // Default: write cover art alongside the audio files (as cover.jpg).
+      // Jellyfin / Plex / MusicBee / foobar2000 / Picard all read this
+      // layout, so art travels with the user's collection — critical for
+      // shared-filesystem setups where multiple machines index the same
+      // library. Falls back to the app cache dir if the folder isn't
+      // writable (read-only share, permission denied, etc.).
+      //
+      // Previous default was 'cache', which produced two recurring
+      // problems on real setups: (1) machine-A-only art that machine B
+      // re-downloaded, (2) orphaned cache files when users moved their
+      // music folder. 'album-folder' avoids both.
+      coverArtStorage: 'album-folder',
       coverArtFilename: 'cover',
       allowFileDeletion: false,
     },
