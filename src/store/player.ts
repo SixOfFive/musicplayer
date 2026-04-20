@@ -280,6 +280,79 @@ export const usePlayer = create<PlayerState>((set, get) => {
   engine.element.addEventListener('play', () => { set({ isPlaying: true }); lastTickAt = performance.now(); });
   engine.element.addEventListener('pause', () => { set({ isPlaying: false }); lastTickAt = null; });
 
+  // Track the IDs we've already tried and failed on within the current
+  // auto-advance sweep. Prevents an infinite loop when MULTIPLE tracks in
+  // the queue are broken — each one errors, we advance to the next,
+  // THAT one errors, we advance again, etc. Cleared whenever playback
+  // actually succeeds (a `play` event fires) or the user issues a new
+  // top-level `play([...])` command.
+  const failedTrackIds = new Set<number>();
+  engine.element.addEventListener('play', () => { failedTrackIds.clear(); });
+
+  /**
+   * The element entered error state — file missing (ENOENT on the mp-media
+   * handler), decode failure (bad header, unsupported codec), network drop,
+   * etc. Without this handler the UI would freeze with a stuck pause-
+   * button icon because neither `play` nor `pause` fires when the element
+   * rejects the source — isPlaying keeps whatever value it had from the
+   * previous track and the scrubber stops moving.
+   *
+   * Recovery policy:
+   *   1. Force isPlaying=false so the button goes back to a usable state.
+   *   2. If there's another track in the queue we haven't already failed
+   *      on in this sweep, advance to it automatically. This is the
+   *      common case — one dead file shouldn't halt a whole playlist.
+   *   3. If every remaining track has failed (or we're at the end of the
+   *      queue), stop cleanly. The user sees a stopped player rather than
+   *      a frozen one.
+   */
+  engine.element.addEventListener('error', async () => {
+    const s = get();
+    const cur = s.queue[s.index];
+    const errSrc = engine.element.src;
+    const errCode = engine.element.error?.code;
+    const errMsg = engine.element.error?.message ?? '';
+    console.warn(`[player] audio error recovery | src=${errSrc} code=${errCode} msg=${errMsg} curId=${cur?.id}`);
+
+    // Always drop isPlaying — the UI should reflect "not playing" because
+    // we genuinely aren't.
+    set({ isPlaying: false, position: 0 });
+    lastTickAt = null;
+
+    // Radio-mode errors (stream dropped) — different recovery path. For
+    // now, just clear radio and stop. User can click a station again.
+    if (s.radio) {
+      console.warn('[player] radio stream errored, clearing radio mode');
+      set({ radio: null });
+      return;
+    }
+
+    if (cur) failedTrackIds.add(cur.id);
+
+    // Find the next queue item we haven't already failed on. Respect
+    // repeat-all (wrap around the queue) but never try an ID we just
+    // failed, to avoid a tight retry loop.
+    if (s.queue.length === 0) return;
+    let tried = 0;
+    let ni = s.index;
+    while (tried < s.queue.length) {
+      ni = ni + 1;
+      if (ni >= s.queue.length) {
+        if (s.repeatMode === 'all') ni = 0;
+        else break;
+      }
+      const candidate = s.queue[ni];
+      if (!failedTrackIds.has(candidate.id)) {
+        console.log(`[player] auto-advancing past errored track → "${candidate.title}"`);
+        set({ index: ni });
+        await loadAndPlay(candidate);
+        return;
+      }
+      tried++;
+    }
+    console.warn('[player] every remaining track in the queue has failed; stopping');
+  });
+
   window.addEventListener('beforeunload', () => {
     const completed = accountingDurationSec ? accountedSec / accountingDurationSec > 0.5 : false;
     flushAccounting(completed);
@@ -313,6 +386,11 @@ export const usePlayer = create<PlayerState>((set, get) => {
 
     async play(items, startIndex = 0) {
       flushAccounting(accountingDurationSec ? accountedSec / accountingDurationSec > 0.5 : false);
+      // New top-level play command: reset the "tracks we've given up on"
+      // set. Without this, a user who restores a file that was previously
+      // broken would still have the player skip past it because its id is
+      // still remembered from the last failure sweep.
+      failedTrackIds.clear();
       // Switching to local files clears radio mode. Also stop the ICY sniffer
       // — it's a separate main-process HTTP connection that otherwise leaks
       // until the next playRadio or app exit.
