@@ -352,6 +352,10 @@ export const IPC = {
   // presses; renderer also sets up navigator.mediaSession which
   // Chromium forwards to the OS-level integrations.
   MEDIA_KEY: 'media:key', // main → renderer push: 'play-pause' | 'next' | 'prev' | 'stop'
+  // Local-only recommendation engine. Computes from play_events +
+  // track_likes + track attributes (artist / album / genre / year).
+  // No external calls, no ML — pure scoring over the user's own data.
+  SUGGESTIONS_GET: 'suggestions:get',
   // Visualizer plugins
   VIS_LIST: 'vis:list',
   VIS_SCAN_DIRS: 'vis:scan-dirs',
@@ -710,6 +714,34 @@ export interface DlnaIncomingMedia {
  *  transport functions. Kept deliberately small — only the hardware
  *  buttons that actually exist on typical keyboards / headphones. */
 export type MediaKeyAction = 'play-pause' | 'next' | 'prev' | 'stop';
+
+/** One ranked track from the local recommendation engine. The score
+ *  is normalised roughly into 0-1 (sum of weighted 0-1 components)
+ *  but isn't hard-capped — use the sort order, not the absolute value,
+ *  for UI decisions. `reason` carries a short chip-ready label
+ *  explaining the dominant signal behind the rank so the user isn't
+ *  staring at a black-box list. */
+export interface SuggestionEntry {
+  id: number;
+  title: string;
+  artist: string | null;
+  album: string | null;
+  path: string;
+  duration_sec: number | null;
+  cover_art_path: string | null;
+  year: number | null;
+  genre: string | null;
+  liked: boolean;
+  score: number;
+  /** Primary driver of this track's score. Used to caption the
+   *  "why is this here?" chip next to the row. */
+  reason: 'artist' | 'genre' | 'album' | 'era';
+  /** Specific context attached to the reason — artist name for
+   *  'artist', genre name for 'genre', album title for 'album',
+   *  decade string (e.g. "1990s") for 'era'. Empty if we couldn't
+   *  resolve it (rare — scoring requires these to be non-null). */
+  reasonDetail: string;
+}
 
 export interface LargestAlbum {
   id: number;

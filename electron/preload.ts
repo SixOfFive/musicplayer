@@ -198,6 +198,11 @@ const api = {
       return () => ipcRenderer.removeListener(IPC.MEDIA_KEY, listener);
     },
   },
+  // Local recommendation engine. `limit` clamped server-side to [1,500];
+  // default 100 if omitted.
+  suggestions: {
+    get: (limit?: number) => ipcRenderer.invoke(IPC.SUGGESTIONS_GET, limit),
+  },
   convert: {
     checkAvailable: () => ipcRenderer.invoke(IPC.CONVERT_CHECK_AVAILABLE),
     albumToMp3: (albumId: number) => ipcRenderer.invoke(IPC.CONVERT_ALBUM_TO_MP3, albumId),

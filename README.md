@@ -217,6 +217,22 @@ npm run electron:build      # produces platform installer via electron-builder
 - Volume persists across sessions
 - Back/Forward buttons in TopBar track a proper history stack; scroll position restored per page so Back returns you to exactly where you left off
 
+### Suggested tracks ("Suggested for you")
+- Dedicated left-sidebar tab surfacing the **top 100 tracks** in your library ranked by how closely they match your listening taste. Pure local scoring — no ML, no external APIs, no data leaves your machine.
+- Taste profile computed from `track_plays_summary` (play count + last-played timestamp) and `track_likes` (explicit positive signal), with a 180-day exponential recency half-life so this month's favourites dominate what you were into two years ago.
+- Each candidate track gets a weighted score: **40% artist affinity + 25% genre affinity + 15% album affinity + 10% year proximity**, each component normalised 0-1 so one dominant artist can't swamp the signal. Year proximity uses a ±5-year bell curve around years you listen to heavily.
+- **Discovery bias:** tracks played in the last 14 days are scaled down (stale for a "suggested" list), and liked-and-played-more-than-10-times tracks are halved so you're nudged toward genuinely new stuff from artists you already love.
+- **Reason chip** on every row names the dominant signal — "More Eric Clapton", "Genre: Blues Rock", "From Layla and Other Assorted Love Songs", "1970s era" — so the list doesn't feel like a black box. Tinted by reason so the eye can quickly see the mix.
+- Click any row to play; the full ranked 100 feeds into the queue so next/prev walk through your top picks. Refresh button recomputes on demand.
+
+### OS-level media controls
+- **Hardware media keys** (Play/Pause, Next, Prev, Stop on keyboards / Bluetooth headsets / remotes) work globally via Electron's `globalShortcut` — playback responds even when the MusicPlayer window isn't focused. If Spotify / iTunes is running and already owns the keys, a `[media-keys] could NOT bind` log line tells you why they're not responding.
+- **`navigator.mediaSession`** integration wires track metadata (title, artist, album, cover art) + play/pause/next/prev/seek handlers into the OS:
+  - **Windows** — System Media Transport Controls widget (the panel that pops up on media-key press + the Windows 11 quick-settings media tile)
+  - **macOS** — Now Playing in Control Center + Touch Bar + the on-screen media-key overlay
+  - **Linux** — MPRIS2 over D-Bus (KDE/GNOME media applets, `playerctl`, Bluetooth LE headset controls)
+- Bluetooth headphone play/pause/next buttons route through the same pathway — cast a track to a Cast / HA / DLNA speaker, hit pause on your AirPods, and it pauses on whichever sink is actually playing.
+
 ### Audio output routing
 - **Speaker icon next to the volume slider** opens an output-device picker with four grouped sections — local sinks, Google Cast / Nest, Home Assistant media_player entities, and DLNA / UPnP MediaRenderers — all in the same dropdown. Exactly one sink at a time; switching between them stops the previous cleanly.
 - **Local devices**: System default + every named playback device (Bluetooth headphones, USB DACs, specific HDMI outputs) via `setSinkId` against `navigator.mediaDevices.enumerateDevices`. Selection persists across restarts and falls back to System default if the previously-chosen device has been unplugged.

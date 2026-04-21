@@ -22,6 +22,7 @@ import { registerHomeAssistantIpc } from './ipc/homeassistant';
 import { registerDlnaIpc } from './ipc/dlna';
 import { startDlnaDiscovery, startDlnaReceiver } from './services/dlna';
 import { registerMediaKeys } from './services/media-keys';
+import { registerSuggestionsIpc } from './ipc/suggestions';
 import { setAutoUpdaterWindow } from './services/updater';
 import { importPlaylistsFromFolder } from './services/playlist-export';
 import { initDatabase } from './services/db';
@@ -497,6 +498,10 @@ app.whenReady().then(async () => {
   // return false for every accelerator, and that's fine — the
   // navigator.mediaSession side still works via MPRIS.
   safeInit('media-keys',         () => registerMediaKeys(() => mainWindow));
+  // Local recommendation engine. Pure SQL aggregates — no network, no
+  // ML, no third-party APIs. Zero cost at register time; scoring only
+  // runs when the renderer asks via suggestions:get.
+  safeInit('suggestions-ipc',    () => registerSuggestionsIpc(ipcMain));
   setAutoUpdaterWindow(() => mainWindow);
 
   // Debug: toggle DevTools on demand (used by Settings → About & Updates).
