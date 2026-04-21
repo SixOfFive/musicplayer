@@ -249,7 +249,18 @@ export async function applyUpdate(): Promise<ApplyUpdateResult> {
         };
       }
       // setImmediate so this IPC handler can return before the app quits.
-      setImmediate(() => updater.quitAndInstall());
+      // Args: (isSilent, isForceRunAfter).
+      //   isSilent=true — run the NSIS installer without the UI wizard, so
+      //     there's no window for Windows to steal focus from, no "click
+      //     next" prompts, no race where the user's click happens while a
+      //     file is still held by the exiting process. With `oneClick: true`
+      //     in package.json's nsis config this is what the updater wants
+      //     anyway; explicit is safer than relying on the default.
+      //   isForceRunAfter=true — the installer launches the new version
+      //     as the last step. Without this, a silent install just exits
+      //     and the user sees the app disappear with no indication it
+      //     upgraded.
+      setImmediate(() => updater.quitAndInstall(true, true));
       return {
         ok: true, needsRestart: true, newSha: null, pulledCommits: 1,
         message: 'Installing update and restarting…',

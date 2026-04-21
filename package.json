@@ -101,12 +101,12 @@
       }
     ],
     "nsis": {
-      "oneClick": false,
-      "allowElevation": true,
-      "allowToChangeInstallationDirectory": true,
+      "oneClick": true,
+      "perMachine": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "MusicPlayer"
+      "shortcutName": "MusicPlayer",
+      "deleteAppDataOnUninstall": false
     }
   }
 }
