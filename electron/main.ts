@@ -23,6 +23,7 @@ import { registerDlnaIpc } from './ipc/dlna';
 import { startDlnaDiscovery, startDlnaReceiver } from './services/dlna';
 import { registerMediaKeys } from './services/media-keys';
 import { registerSuggestionsIpc } from './ipc/suggestions';
+import { registerTagAuditIpc } from './ipc/tag-audit';
 import { setAutoUpdaterWindow } from './services/updater';
 import { importPlaylistsFromFolder } from './services/playlist-export';
 import { initDatabase } from './services/db';
@@ -502,6 +503,7 @@ app.whenReady().then(async () => {
   // ML, no third-party APIs. Zero cost at register time; scoring only
   // runs when the renderer asks via suggestions:get.
   safeInit('suggestions-ipc',    () => registerSuggestionsIpc(ipcMain));
+  safeInit('tag-audit-ipc',      () => registerTagAuditIpc(ipcMain, () => mainWindow));
   setAutoUpdaterWindow(() => mainWindow);
 
   // Debug: toggle DevTools on demand (used by Settings → About & Updates).

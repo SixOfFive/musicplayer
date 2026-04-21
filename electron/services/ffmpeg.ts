@@ -47,6 +47,92 @@ export interface ConvertResult {
 }
 
 /**
+ * Rewrite one or more metadata tags on a file WITHOUT re-encoding the
+ * audio. Uses `ffmpeg -c copy` which muxes the existing compressed
+ * stream into a new container with updated metadata — lossless, fast
+ * (under a second for most files, even 50 MB FLACs), and format-
+ * agnostic: ffmpeg picks the right underlying tag framework (ID3v2
+ * for MP3, Vorbis comments for FLAC/Opus/OGG, iTunes atoms for
+ * M4A/AAC, etc.) based on the container.
+ *
+ * Writes to a sibling `.tmp.<ext>` then atomically renames over the
+ * original on success. On failure the .tmp is removed and the
+ * original is untouched, so an ffmpeg crash mid-write can't corrupt
+ * the file.
+ *
+ * SMB note: fs.rename across filesystems fails with EXDEV. We're
+ * writing the tmp next to the original, so same filesystem — safe.
+ * The Windows SMB client still occasionally throws EBUSY if the file
+ * is open; caller should handle that by logging + skipping.
+ */
+export interface TagWriteResult {
+  ok: boolean;
+  error?: string;
+}
+
+export async function writeTags(
+  filePath: string,
+  tags: Record<string, string>,
+): Promise<TagWriteResult> {
+  const ff = getFfmpegPath();
+  if (!ff) return { ok: false, error: 'ffmpeg binary not available' };
+
+  const dir = path.dirname(filePath);
+  const ext = path.extname(filePath);
+  const base = path.basename(filePath, ext);
+  // Sibling tmp path so the rename is on the same filesystem (atomic).
+  // Include a random suffix so two concurrent tag-writes on the same
+  // file don't collide — rare, but the convert pipeline can run
+  // alongside this in the background.
+  const tmpPath = path.join(dir, `.${base}.tagtmp.${Date.now()}.${Math.floor(Math.random() * 1e6)}${ext}`);
+
+  // -map_metadata 0 preserves ALL existing metadata from input (else
+  // ffmpeg would drop every tag not explicitly listed in -metadata
+  // args). Then our -metadata args overwrite the specific fields.
+  // -c copy on both audio + video (cover art) streams so nothing
+  // gets re-encoded. -map 0 includes every input stream in the
+  // output (without this, ffmpeg drops cover-art PNG streams on some
+  // containers).
+  const args: string[] = [
+    '-hide_banner', '-loglevel', 'error', '-y',
+    '-i', filePath,
+    '-map', '0',
+    '-map_metadata', '0',
+    '-c', 'copy',
+  ];
+  for (const [k, v] of Object.entries(tags)) {
+    args.push('-metadata', `${k}=${v}`);
+  }
+  args.push(tmpPath);
+
+  return new Promise((resolve) => {
+    const child = spawn(ff, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+    child.stderr.on('data', (c: Buffer) => { stderr += c.toString('utf8'); });
+    child.on('error', async (err) => {
+      try { await fs.unlink(tmpPath); } catch { /* noop */ }
+      resolve({ ok: false, error: `ffmpeg spawn failed: ${err.message}` });
+    });
+    child.on('close', async (code) => {
+      if (code !== 0) {
+        try { await fs.unlink(tmpPath); } catch { /* noop */ }
+        resolve({ ok: false, error: `ffmpeg exit ${code}: ${stderr.slice(-400)}` });
+        return;
+      }
+      // Replace the original. fs.rename is atomic on the same filesystem.
+      try {
+        await fs.rename(tmpPath, filePath);
+        resolve({ ok: true });
+      } catch (err: any) {
+        // Last-ditch cleanup so a failed rename doesn't litter tmp files.
+        try { await fs.unlink(tmpPath); } catch { /* noop */ }
+        resolve({ ok: false, error: `rename failed: ${err?.message ?? err}` });
+      }
+    });
+  });
+}
+
+/**
  * Convert a single audio file to MP3 using libmp3lame.
  * Preserves metadata tags and embedded cover art.
  *

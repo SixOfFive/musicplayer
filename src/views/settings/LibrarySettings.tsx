@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import YearTagAudit from './YearTagAudit';
 
 interface Dir { id: number; path: string; enabled: boolean; lastScannedAt: number | null; }
 
@@ -275,6 +276,16 @@ export default function LibrarySettings() {
             </span>
           </label>
         </div>
+      </div>
+
+      {/* Year-tag audit + fix. Self-contained component — scans for
+          two-digit / zero / future / album-outlier year tags and
+          rewrites the file tag via ffmpeg when the user confirms.
+          Section heading matches the visual rhythm of the other
+          Library groupings above. */}
+      <div>
+        <h2 className="text-lg font-semibold mb-1">Tag audit</h2>
+        <YearTagAudit />
       </div>
     </div>
   );

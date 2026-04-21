@@ -73,6 +73,20 @@ const api = {
     // the panel reshuffles fact order per session.
     neat: () => ipcRenderer.invoke(IPC.STATS_NEAT),
   },
+  // Year-tag audit + fix. `auditYears` scans the DB and returns a
+  // preview of fixable issues. `fixYears` takes a subset of those
+  // fixes and writes them back to the files via ffmpeg, emitting
+  // progress events through `onFixProgress`.
+  tags: {
+    auditYears: () => ipcRenderer.invoke(IPC.TAGS_AUDIT_YEARS),
+    fixYears: (fixes: Array<{ trackId: number; path: string; year: number }>) =>
+      ipcRenderer.invoke(IPC.TAGS_FIX_YEARS, fixes),
+    onFixProgress: (cb: (p: { done: number; total: number; currentPath: string | null; errors: Array<{ trackId: number; path: string; error: string }>; finished: boolean }) => void) => {
+      const listener = (_: unknown, p: any) => cb(p);
+      ipcRenderer.on(IPC.TAGS_FIX_PROGRESS, listener);
+      return () => ipcRenderer.removeListener(IPC.TAGS_FIX_PROGRESS, listener);
+    },
+  },
   update: {
     info: () => ipcRenderer.invoke(IPC.UPDATE_INFO),
     check: () => ipcRenderer.invoke(IPC.UPDATE_CHECK),

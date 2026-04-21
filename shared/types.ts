@@ -359,6 +359,14 @@ export const IPC = {
   // Fat aggregate dump for the fun-fact banner. Computed on demand —
   // the panel fetches once per mount and reshuffles the fact order.
   STATS_NEAT: 'stats:neat',
+  // Year-tag audit + fix. Reads the tracks table to find tracks with
+  // suspicious years (2-digit, zero, future, or disagreeing with their
+  // album's consensus) and proposes a corrected year per track.
+  // Separate fix IPC actually writes the new year back into the file
+  // tag via ffmpeg and updates the DB row.
+  TAGS_AUDIT_YEARS: 'tags:audit-years',
+  TAGS_FIX_YEARS: 'tags:fix-years',
+  TAGS_FIX_PROGRESS: 'tags:fix-progress',  // main → renderer push during bulk fix
   // Visualizer plugins
   VIS_LIST: 'vis:list',
   VIS_SCAN_DIRS: 'vis:scan-dirs',
@@ -840,6 +848,49 @@ export interface DlnaIncomingMedia {
  *  transport functions. Kept deliberately small — only the hardware
  *  buttons that actually exist on typical keyboards / headphones. */
 export type MediaKeyAction = 'play-pause' | 'next' | 'prev' | 'stop';
+
+/** Type of year-tag corruption detected on a single track. Drives the
+ *  UI grouping in the audit view — each bucket is rendered under its
+ *  own collapsible header so the user can see what's being fixed and
+ *  why. */
+export type YearTagIssue =
+  | 'two-digit'      // year < 100 (Y2K-style truncated: "96" for 1996)
+  | 'zero'           // year = 0 (placeholder in the tag)
+  | 'future'         // year > current year + 1 (typo)
+  | 'album-outlier'; // year disagrees with album's consensus year
+
+export interface YearTagFix {
+  trackId: number;
+  path: string;
+  title: string;
+  artist: string | null;
+  album: string | null;
+  currentYear: number | null;
+  suggestedYear: number | null;
+  issue: YearTagIssue;
+  /** Human-readable explanation for the UI — "Two-digit year 96 → 1996",
+   *  "Outlier in album where 14 other tracks are 1998", etc. */
+  reason: string;
+}
+
+export interface YearAuditResult {
+  summary: {
+    twoDigit: number;
+    zero: number;
+    future: number;
+    albumOutlier: number;
+    total: number;
+  };
+  fixes: YearTagFix[];
+}
+
+export interface YearFixProgress {
+  done: number;
+  total: number;
+  currentPath: string | null;
+  errors: Array<{ trackId: number; path: string; error: string }>;
+  finished: boolean;
+}
 
 /** One ranked track from the local recommendation engine. The score
  *  is normalised roughly into 0-1 (sum of weighted 0-1 components)
