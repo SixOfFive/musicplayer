@@ -83,6 +83,7 @@ export function registerLibraryIpc(ipcMain: IpcMain, _getWin: () => BrowserWindo
         SELECT al.id, al.title, al.year, al.genre, al.cover_art_path, ar.name AS artist,
                (SELECT COUNT(*) FROM tracks t WHERE t.album_id = al.id) AS track_count,
                (SELECT COALESCE(SUM(size), 0) FROM tracks t WHERE t.album_id = al.id) AS bytes,
+               (SELECT COALESCE(SUM(duration_sec), 0) FROM tracks t WHERE t.album_id = al.id) AS duration_sec,
                (SELECT COUNT(*) FROM tracks t WHERE t.album_id = al.id AND LOWER(t.path) LIKE '%.flac') AS flac_count,
                (SELECT COALESCE(SUM(size), 0) FROM tracks t WHERE t.album_id = al.id AND LOWER(t.path) LIKE '%.flac') AS flac_bytes,
                CAST(
@@ -127,8 +128,13 @@ export function registerLibraryIpc(ipcMain: IpcMain, _getWin: () => BrowserWindo
     const albums = getDb()
       .prepare(`
         SELECT al.id, al.title, al.year, al.genre, al.cover_art_path,
-               (SELECT COUNT(*) FROM tracks t WHERE t.album_id = al.id) AS track_count
-        FROM albums al WHERE al.artist_id = ?
+               ar.name AS artist,
+               (SELECT COUNT(*) FROM tracks t WHERE t.album_id = al.id) AS track_count,
+               (SELECT COALESCE(SUM(size), 0) FROM tracks t WHERE t.album_id = al.id) AS bytes,
+               (SELECT COALESCE(SUM(duration_sec), 0) FROM tracks t WHERE t.album_id = al.id) AS duration_sec
+        FROM albums al
+        LEFT JOIN artists ar ON ar.id = al.artist_id
+        WHERE al.artist_id = ?
         ORDER BY al.year DESC NULLS LAST, al.title ASC
       `)
       .all(id) as Array<any>;
@@ -208,10 +214,11 @@ export function registerLibraryIpc(ipcMain: IpcMain, _getWin: () => BrowserWindo
     `).all(...params);
 
     const albums = db.prepare(`
-      SELECT al.id, al.title, al.year, al.cover_art_path AS coverArtPath,
+      SELECT al.id, al.title, al.year, al.genre, al.cover_art_path AS coverArtPath,
              ar.name AS artist,
              COUNT(t.id) AS trackCount,
-             COALESCE(SUM(t.size), 0) AS bytes
+             COALESCE(SUM(t.size), 0) AS bytes,
+             COALESCE(SUM(t.duration_sec), 0) AS durationSec
       FROM albums al
       LEFT JOIN artists ar ON ar.id = al.artist_id
       LEFT JOIN tracks t ON t.album_id = al.id
@@ -245,10 +252,11 @@ export function registerLibraryIpc(ipcMain: IpcMain, _getWin: () => BrowserWindo
   ipcMain.handle(IPC.LIBRARY_LARGEST_ALBUMS, (_e, limit: number = 25) => {
     const n = Math.max(1, Math.min(100, Math.floor(limit)));
     return getDb().prepare(`
-      SELECT al.id, al.title, al.cover_art_path AS coverArtPath,
+      SELECT al.id, al.title, al.year, al.genre, al.cover_art_path AS coverArtPath,
              ar.name AS artist,
              COUNT(t.id) AS trackCount,
-             COALESCE(SUM(t.size), 0) AS bytes
+             COALESCE(SUM(t.size), 0) AS bytes,
+             COALESCE(SUM(t.duration_sec), 0) AS durationSec
       FROM albums al
       LEFT JOIN artists ar ON ar.id = al.artist_id
       LEFT JOIN tracks t ON t.album_id = al.id

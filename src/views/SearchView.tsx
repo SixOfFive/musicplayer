@@ -334,8 +334,27 @@ export default function SearchView() {
 }
 
 function AlbumCardMini({ album, onClick }: { album: SearchAlbumHit; onClick: () => void }) {
+  // Same rich-tooltip shape as AlbumCard (title / artist / year·genre /
+  // tracks·duration·size). Duplicated inline rather than extracted to a
+  // util because this mini-card is the only other call site and keeping
+  // the formatter local keeps imports cheap.
+  const lines: string[] = [album.title];
+  if (album.artist) lines.push(album.artist);
+  const yearGenre = [album.year, album.genre].filter(Boolean).join(' · ');
+  if (yearGenre) lines.push(yearGenre);
+  const stats: string[] = [];
+  if (album.trackCount > 0) stats.push(`${album.trackCount} track${album.trackCount === 1 ? '' : 's'}`);
+  if (album.durationSec && album.durationSec > 0) {
+    const h = Math.floor(album.durationSec / 3600);
+    const m = Math.floor((album.durationSec % 3600) / 60);
+    stats.push(h > 0 ? `${h}h ${m}m` : `${m}m`);
+  }
+  if (album.bytes > 0) stats.push(formatBytes(album.bytes));
+  if (stats.length > 0) lines.push(stats.join(' · '));
+  const tooltip = lines.join('\n');
+
   return (
-    <div onClick={onClick} className="cursor-pointer group">
+    <div onClick={onClick} className="cursor-pointer group" title={tooltip}>
       <div className="aspect-square rounded bg-bg-highlight overflow-hidden mb-2 relative">
         {album.coverArtPath ? (
           <img src={mediaUrl(album.coverArtPath)} alt="" className="w-full h-full object-cover group-hover:scale-[1.03] transition" />

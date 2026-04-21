@@ -21,6 +21,8 @@ interface AlbumRow {
   genre: string | null;
   cover_art_path: string | null;
   track_count: number;
+  bytes?: number;
+  duration_sec?: number;
 }
 
 function formatDur(sec: number) {
@@ -92,6 +94,11 @@ export default function ArtistView() {
               <AlbumCard key={a.id} album={{
                 id: a.id, title: a.title, artist: artist.name,
                 year: a.year, genre: a.genre, cover_art_path: a.cover_art_path,
+                // Pass the aggregate fields (added to the artist query) so
+                // AlbumCard's hover tooltip can show track/runtime/size.
+                track_count: a.track_count,
+                bytes: a.bytes,
+                duration_sec: a.duration_sec,
               }} />
             ))}
           </div>

@@ -2,6 +2,7 @@ import { useNavigate } from 'react-router-dom';
 import { usePlayer } from '../store/player';
 import { mediaUrl } from '../lib/mediaUrl';
 import { firstLetter } from './AlphaRail';
+import { formatBytes } from '../hooks/useScanProgress';
 
 interface Props {
   album: {
@@ -12,11 +13,30 @@ interface Props {
     genre?: string | null;
     cover_art_path: string | null;
     bytes?: number;
+    track_count?: number;
+    duration_sec?: number;
     flac_count?: number;
     projected_mp3_savings?: number;
   };
   // Minimum % savings required to show the 🗜 badge. Default 5 (=5%).
   minSavingsPercent?: number;
+}
+
+/**
+ * Format a duration in seconds as "Xh Ym" for albums (hours ≥ 1) or
+ * "Ym Zs" for shorter items. Returns null on missing/zero so callers
+ * can hide the field entirely. Matches the style used in the album
+ * header metadata line so hover tooltips look consistent with the
+ * page content.
+ */
+function formatDuration(sec: number | null | undefined): string | null {
+  if (!sec || sec <= 0) return null;
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.floor(sec % 60);
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
 }
 
 export default function AlbumCard({ album, minSavingsPercent = 5 }: Props) {
@@ -44,6 +64,26 @@ export default function AlbumCard({ album, minSavingsPercent = 5 }: Props) {
     );
   }
 
+  // Multi-line hover tooltip. The browser renders `\n` inside a `title`
+  // attribute as line breaks on most platforms (Chromium / Electron
+  // definitely), which is exactly what we want: album, artist, year,
+  // genre, then the "numbers" bundle — track count, runtime, on-disk
+  // size. Skip lines for fields we don't have so the tooltip doesn't
+  // advertise missing data.
+  const tooltipLines: string[] = [album.title];
+  if (album.artist) tooltipLines.push(album.artist);
+  const yearGenre = [album.year, album.genre].filter(Boolean).join(' · ');
+  if (yearGenre) tooltipLines.push(yearGenre);
+  const statsBits: string[] = [];
+  if (typeof album.track_count === 'number' && album.track_count > 0) {
+    statsBits.push(`${album.track_count} track${album.track_count === 1 ? '' : 's'}`);
+  }
+  const dur = formatDuration(album.duration_sec);
+  if (dur) statsBits.push(dur);
+  if (typeof album.bytes === 'number' && album.bytes > 0) statsBits.push(formatBytes(album.bytes));
+  if (statsBits.length > 0) tooltipLines.push(statsBits.join(' · '));
+  const tooltip = tooltipLines.join('\n');
+
   return (
     <div
       onClick={() => nav(`/album/${album.id}`)}
@@ -51,6 +91,7 @@ export default function AlbumCard({ album, minSavingsPercent = 5 }: Props) {
       // section via querySelector, without needing a ref per card. Safe to
       // add unconditionally — the browser ignores unrecognised data-attrs.
       data-alpha-letter={firstLetter(album.title)}
+      title={tooltip}
       className="group relative bg-bg-elev-1 hover:bg-bg-elev-2 p-3 rounded cursor-pointer transition"
     >
       <div className="relative aspect-square w-full mb-2">

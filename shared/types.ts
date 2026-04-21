@@ -533,8 +533,10 @@ export interface SearchAlbumHit {
   artist: string | null;
   coverArtPath: string | null;
   year: number | null;
+  genre?: string | null;
   trackCount: number;
   bytes: number;
+  durationSec?: number;
 }
 export interface SearchArtistHit {
   id: number;
