@@ -187,6 +187,17 @@ const api = {
       return () => ipcRenderer.removeListener(IPC.HA_STATUS, listener);
     },
   },
+  // System media keys — hardware Play/Pause/Next/Prev/Stop buttons.
+  // Main registers globalShortcut for each and pushes the action name
+  // through this channel. Renderer subscribes once from the player
+  // store so keys work globally regardless of which view is mounted.
+  mediaKeys: {
+    onKey: (cb: (action: 'play-pause' | 'next' | 'prev' | 'stop') => void) => {
+      const listener = (_: unknown, action: any) => cb(action);
+      ipcRenderer.on(IPC.MEDIA_KEY, listener);
+      return () => ipcRenderer.removeListener(IPC.MEDIA_KEY, listener);
+    },
+  },
   convert: {
     checkAvailable: () => ipcRenderer.invoke(IPC.CONVERT_CHECK_AVAILABLE),
     albumToMp3: (albumId: number) => ipcRenderer.invoke(IPC.CONVERT_ALBUM_TO_MP3, albumId),

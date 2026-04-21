@@ -345,6 +345,13 @@ export const IPC = {
   DLNA_RECEIVER_STATE:'dlna:receiver-state', // renderer → main (our <audio> state for sender-facing responses)
   // Playback helpers
   PLAYBACK_FILE_URL: 'playback:file-url',
+  // System media keys — the play/pause/next/prev buttons on keyboards,
+  // Bluetooth headsets (via OS-level media-session forwarding), and the
+  // dedicated "media controls" widget in Win SMTC / macOS Now Playing /
+  // Linux MPRIS panels. Main registers globalShortcut for hardware key
+  // presses; renderer also sets up navigator.mediaSession which
+  // Chromium forwards to the OS-level integrations.
+  MEDIA_KEY: 'media:key', // main → renderer push: 'play-pause' | 'next' | 'prev' | 'stop'
   // Visualizer plugins
   VIS_LIST: 'vis:list',
   VIS_SCAN_DIRS: 'vis:scan-dirs',
@@ -697,6 +704,12 @@ export interface DlnaIncomingMedia {
   artist?: string;
   album?: string;
 }
+
+/** System media-key action name. Dispatched from main's globalShortcut
+ *  handler to the renderer, which maps it to the player store's
+ *  transport functions. Kept deliberately small — only the hardware
+ *  buttons that actually exist on typical keyboards / headphones. */
+export type MediaKeyAction = 'play-pause' | 'next' | 'prev' | 'stop';
 
 export interface LargestAlbum {
   id: number;
