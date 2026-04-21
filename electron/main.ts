@@ -1,10 +1,11 @@
-import { app, BrowserWindow, ipcMain, dialog, protocol, net, session } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, protocol, net, session, nativeImage } from 'electron';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import { Readable } from 'node:stream';
 import { statWithFallback } from './services/fs-fallback';
+import { imageMemCache, isCacheableImage, type CachedImage, persistLoad as loadImageCache, persistSaveIfDirty as saveImageCache } from './services/image-cache';
 import { registerSettingsIpc } from './ipc/settings';
 import { registerLibraryIpc } from './ipc/library';
 import { registerScanIpc, setProgressWindow, resumeArtFetchOnStartup } from './ipc/scan';
@@ -94,6 +95,55 @@ function createWindow() {
 // Content-type lookup for the file extensions we serve. Browsers match on
 // `audio/*` / `image/*` to pick a decoder; mismatched MIME can silently
 // disable playback or cause Range requests to be skipped.
+// Max dimension (in device-independent pixels) for cached cover art. Bigger
+// than the largest visible placement in the UI — album detail is 224 px,
+// 2× Retina puts that at 448 px, so 1024 leaves headroom while still
+// dropping most "4000×4000 hi-res scan" covers to roughly their RAM weight.
+const COVER_THUMB_MAX_DIM = 1024;
+
+/**
+ * Downscale an image buffer to `COVER_THUMB_MAX_DIM` on its longest side,
+ * preserving aspect ratio and format. If the image is already within the
+ * limit, returns the input unchanged (no re-encode, no quality loss). If
+ * the buffer isn't a recognised image, returns it unchanged too — the
+ * cache stores the raw bytes and the renderer falls back to the original.
+ *
+ * Uses Electron's built-in `nativeImage` so no extra native dep. Format
+ * preservation matters: cover art is rarely an arbitrary JPEG, but
+ * designed covers with transparency (PNG) shouldn't be silently flattened
+ * to opaque JPEG.
+ */
+function thumbnailImage(raw: Buffer, contentType: string): { bytes: Buffer; contentType: string } {
+  // GIFs can be animated — nativeImage would freeze them on the first
+  // frame. Almost never the case for covers, but cheap to respect.
+  if (contentType === 'image/gif') return { bytes: raw, contentType };
+
+  let img;
+  try { img = nativeImage.createFromBuffer(raw); }
+  catch { return { bytes: raw, contentType }; }
+  if (img.isEmpty()) return { bytes: raw, contentType };
+
+  const { width, height } = img.getSize();
+  if (width <= COVER_THUMB_MAX_DIM && height <= COVER_THUMB_MAX_DIM) {
+    // Already small — no point re-encoding.
+    return { bytes: raw, contentType };
+  }
+  const scale = COVER_THUMB_MAX_DIM / Math.max(width, height);
+  const resized = img.resize({
+    width: Math.round(width * scale),
+    height: Math.round(height * scale),
+    quality: 'best',
+  });
+
+  // PNG preserves transparency. JPEG at quality 85 is the right balance
+  // for photo-like covers; the default (unspecified) falls near 80 on
+  // Chromium which is very slightly more artifact-prone.
+  if (contentType === 'image/png' || contentType === 'image/webp') {
+    return { bytes: resized.toPNG(), contentType: 'image/png' };
+  }
+  return { bytes: resized.toJPEG(85), contentType: 'image/jpeg' };
+}
+
 const MIME_BY_EXT: Record<string, string> = {
   '.mp3': 'audio/mpeg',
   '.flac': 'audio/flac',
@@ -149,6 +199,72 @@ function registerMediaProtocol() {
       const size = stat.size;
       const ext = path.extname(resolvedPath).toLowerCase();
       const contentType = MIME_BY_EXT[ext] ?? 'application/octet-stream';
+
+      // ---- Image fast-path: in-memory cache + resize on first load ----
+      //
+      // For cover art we bypass the streaming-range flow entirely: images
+      // are small, never use Range, and get re-requested every time the
+      // user scrolls back to a viewport they've already seen. Caching
+      // them in main-process memory makes repeat renders instant AND
+      // means we don't hammer the user's SMB share re-reading the same
+      // cover.jpg hundreds of times per session.
+      //
+      // On the FIRST request we also thumbnail via Electron's built-in
+      // nativeImage: the biggest visible cover in the UI is the album-
+      // detail header at ~448 px on Retina, so anything above 1024 px
+      // is wasted transfer + RAM. Typical 5 MB cover → 100-200 KB after
+      // resize. Format is preserved (PNG stays PNG, JPEG stays JPEG)
+      // so transparency on designed art is kept.
+      if (!rangeHeader && isCacheableImage(ext)) {
+        const cached = imageMemCache.get(resolvedPath);
+        if (cached && cached.mtimeMs === stat.mtimeMs) {
+          process.stdout.write(`[mp-media] cache hit ${path.basename(resolvedPath)} (${cached.size} bytes in memory)\n`);
+          // Response expects a Uint8Array-ish BodyInit. Node's Buffer IS
+          // a Uint8Array at runtime but the TS types don't know that in
+          // this tsconfig, so we hand back a plain view over the same
+          // memory (no copy).
+          // Cast to any — Node's Buffer is a Uint8Array at runtime but the
+          // ArrayBufferLike vs ArrayBuffer generic mismatch trips TS 5.7+.
+          // Response accepts this fine at runtime.
+          return new Response(
+            cached.bytes as any,
+            {
+              status: 200,
+              headers: {
+                'Content-Type': cached.contentType,
+                'Content-Length': String(cached.size),
+                // Browser can also cache short-term — helps during HMR cycles.
+                'Cache-Control': 'private, max-age=3600',
+              },
+            }
+          );
+        }
+
+        // Miss (or mtime changed) — load, thumbnail, cache.
+        const raw = await fs.readFile(resolvedPath);
+        const thumbnailed = thumbnailImage(raw, contentType);
+        const entry: CachedImage = {
+          bytes: thumbnailed.bytes,
+          contentType: thumbnailed.contentType,
+          size: thumbnailed.bytes.length,
+          mtimeMs: stat.mtimeMs,
+          lastAccess: Date.now(),
+        };
+        imageMemCache.set(resolvedPath, entry);
+        const savings = raw.length - thumbnailed.bytes.length;
+        process.stdout.write(`[mp-media] cached ${path.basename(resolvedPath)}: ${raw.length}→${thumbnailed.bytes.length} bytes${savings > 0 ? ` (−${Math.round((savings / raw.length) * 100)}%)` : ''}\n`);
+        return new Response(
+          entry.bytes as any,
+          {
+            status: 200,
+            headers: {
+              'Content-Type': entry.contentType,
+              'Content-Length': String(entry.size),
+              'Cache-Control': 'private, max-age=3600',
+            },
+          }
+        );
+      }
 
       // Parse `Range: bytes=<start>-<end>` (either end may be missing):
       //   bytes=0-         → start=0, end=size-1   (Chromium probes this first)
@@ -261,9 +377,35 @@ function enableUniversalCors() {
   });
 }
 
+// Where the on-disk image cache lives — computed once app is ready (we
+// can't call app.getPath() until then). Nullable for the pre-ready window
+// but populated before any mp-media request can fire.
+let imageCacheDir: string | null = null;
+
 app.whenReady().then(async () => {
   await initSettings();
   await initDatabase();
+
+  // Rehydrate the cover-art cache from disk before we register the media
+  // protocol so the very first render can hit warm memory instead of the
+  // SMB share. loadImageCache is forgiving: missing index.json, corrupt
+  // blobs, anything — it just loads what it can and reports the rest.
+  imageCacheDir = path.join(app.getPath('userData'), 'image-cache');
+  try {
+    const r = await loadImageCache(imageCacheDir);
+    if (r.wiped) {
+      process.stdout.write(`[image-cache] cache was corrupt — wiped; will rebuild on first render\n`);
+    } else if (r.loaded > 0 || r.skipped > 0) {
+      process.stdout.write(`[image-cache] restored ${r.loaded} cover${r.loaded === 1 ? '' : 's'} from disk${r.skipped > 0 ? ` (${r.skipped} skipped)` : ''}\n`);
+    }
+  } catch (err: any) {
+    // Any uncaught exception here is treated as a hard cache failure —
+    // wipe the dir so next startup gets a clean slate instead of looping
+    // on the same error forever.
+    process.stdout.write(`[image-cache] load threw (${err?.message ?? err}) — wiping cache dir\n`);
+    try { await (await import('node:fs/promises')).rm(imageCacheDir, { recursive: true, force: true }); }
+    catch { /* ignore */ }
+  }
 
   enableUniversalCors();
   registerMediaProtocol();
@@ -324,4 +466,26 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});
+
+// Persist the image cache on quit. `before-quit` fires before windows
+// start closing, which is the latest reliable hook for async work in
+// Electron — any later and `app.exit()` can fire while writeFile is
+// still pending. We explicitly event.preventDefault() and re-quit after
+// the save so the process truly waits for the flush.
+//
+// No-op when the cache isn't dirty (saveImageCache short-circuits).
+let quitInProgress = false;
+app.on('before-quit', (event) => {
+  if (quitInProgress || !imageCacheDir) return;
+  if (!imageMemCache.isDirty()) return;
+  event.preventDefault();
+  quitInProgress = true;
+  saveImageCache(imageCacheDir).then((r) => {
+    if (r.wrote) process.stdout.write(`[image-cache] persisted ${r.saved} cover${r.saved === 1 ? '' : 's'} to disk before quit\n`);
+    app.quit();
+  }).catch((err: any) => {
+    process.stdout.write(`[image-cache] persist on quit FAILED: ${err?.message ?? err}\n`);
+    app.quit();
+  });
 });
