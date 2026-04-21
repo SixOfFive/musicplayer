@@ -190,6 +190,29 @@ export interface LastFmSettings {
   minScrobbleSec: number;
 }
 
+/**
+ * Home Assistant integration. When configured, any `media_player.*`
+ * entity HA exposes becomes a valid playback sink — HA speakers
+ * ("HA Preview"), but also every Sonos / AirPlay / Squeezebox / Snapcast /
+ * MusicAssistant / AVR target a real HA install usually has, via one
+ * uniform REST interface.
+ *
+ * Token handling:
+ *   - Long-lived access token from the user's HA profile page.
+ *   - Stored only in `settings.json` inside `userData` (never in the
+ *     repo, never logged). Log lines print `token=<redacted>` — see
+ *     `electron/services/homeassistant.ts`.
+ */
+export interface HomeAssistantSettings {
+  enabled: boolean;
+  /** e.g. `https://homeassistant.local:8123` — no trailing slash. */
+  baseUrl: string;
+  /** Long-lived access token. NEVER log or transmit outside the main
+   *  process; treated as write-only from the UI's perspective once set
+   *  (the settings panel shows a masked placeholder, not the value). */
+  token: string;
+}
+
 export interface AppSettings {
   firstRunComplete: boolean;
   conversion: ConversionSettings;
@@ -197,6 +220,7 @@ export interface AppSettings {
   update: UpdateSettings;
   debug: DebugSettings;
   lastfm: LastFmSettings;
+  homeAssistant: HomeAssistantSettings;
   library: {
     directories: LibraryDirectory[];
     databasePath: string;
@@ -289,6 +313,18 @@ export const IPC = {
   CAST_ACTIVE: 'cast:active',
   CAST_SEEK: 'cast:seek',
   CAST_STATUS: 'cast:status', // main → renderer push
+  // Home Assistant media_player targets. Same transport surface as Cast
+  // so the player store can route to either with identical shapes.
+  HA_TEST: 'ha:test',                   // test baseUrl + token (settings panel)
+  HA_LIST: 'ha:list',                   // list media_player entities
+  HA_PLAY: 'ha:play',
+  HA_PAUSE: 'ha:pause',
+  HA_RESUME: 'ha:resume',
+  HA_STOP: 'ha:stop',
+  HA_SET_VOLUME: 'ha:set-volume',
+  HA_SEEK: 'ha:seek',
+  HA_ACTIVE: 'ha:active',
+  HA_STATUS: 'ha:status', // main → renderer push
   // Playback helpers
   PLAYBACK_FILE_URL: 'playback:file-url',
   // Visualizer plugins
@@ -575,6 +611,34 @@ export interface CastDeviceRef {
   name: string;
   host: string;
   type: 'chromecast' | 'nest' | 'unknown';
+}
+
+/**
+ * A Home Assistant `media_player.*` entity usable as a playback sink.
+ * Mirrors the shape of `CastDeviceRef` so the OutputDevicePicker can
+ * render both lists with the same row component.
+ */
+export interface HaEntityRef {
+  id: string;                // entity_id e.g. "media_player.living_room"
+  name: string;              // friendly_name (falls back to id)
+  state: string;             // "playing" | "paused" | "idle" | "off" | …
+  /** HA `supported_features` bitmask. PAUSE=1, SEEK=2, VOLUME_SET=4,
+   *  STOP=4096, PLAY=16384, PLAY_MEDIA=512. The picker greys out the
+   *  speaker icon's scrubber / volume slider when the chosen entity
+   *  doesn't advertise the relevant bit. */
+  supportedFeatures: number;
+  volume: number | null;     // 0..1, or null if HA hasn't reported yet
+}
+
+/** Cast / HA push status updates share this shape so the renderer's
+ *  player-store subscriber handles both without branching. The source
+ *  field identifies which sink the update came from — lets the store
+ *  ignore stragglers when the user just switched targets. */
+export interface HaStatusUpdate {
+  entityId: string;
+  currentTime: number;
+  duration: number | null;
+  playerState: 'PLAYING' | 'PAUSED' | 'BUFFERING' | 'IDLE' | 'UNKNOWN';
 }
 
 export interface LargestAlbum {

@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { getAudioEngine } from '../audio/AudioEngine';
 import { useCast } from './cast';
+import { useHomeAssistant } from './homeassistant';
 
 /**
  * Timestamp of the most recent user-initiated Cast seek. The status
@@ -201,11 +202,13 @@ export const usePlayer = create<PlayerState>((set, get) => {
   }
 
   async function loadAndPlay(cur: QueueItem) {
-    // If a Cast device is active, route this track to it instead of
-    // starting local playback. The <audio> element stays paused so we
-    // don't double-play through the laptop speakers + the cast target.
-    const castId = useCast.getState().activeDeviceId;
-    if (castId) {
+    // Route-by-sink. Exactly one of these stores has a non-null active
+    // id at any time (OutputDevicePicker enforces that by stopping one
+    // before activating the other). If nothing's picked we fall through
+    // to local playback via the shared <audio> element.
+    const castId  = useCast.getState().activeDeviceId;
+    const haEntId = useHomeAssistant.getState().activeEntityId;
+    if (castId || haEntId) {
       // Pause local in case a previous track was still on it.
       try { engine.pause(); } catch { /* noop */ }
       if (typeof cur.durationSec === 'number' && cur.durationSec > 0) {
@@ -215,13 +218,21 @@ export const usePlayer = create<PlayerState>((set, get) => {
       }
       startAccounting(cur.id, cur.durationSec, cur.artist, cur.title, cur.album);
       try {
-        await (window.mp as any).cast.play(castId, cur.path, {
-          title: cur.title,
-          artist: cur.artist ?? undefined,
-          album: cur.album ?? undefined,
-        });
+        if (castId) {
+          await (window.mp as any).cast.play(castId, cur.path, {
+            title: cur.title,
+            artist: cur.artist ?? undefined,
+            album: cur.album ?? undefined,
+          });
+        } else if (haEntId) {
+          await (window.mp as any).ha.play(haEntId, cur.path, {
+            title: cur.title,
+            artist: cur.artist ?? undefined,
+            album: cur.album ?? undefined,
+          });
+        }
       } catch (err: any) {
-        console.error(`[player] cast.play failed: ${err?.message ?? err}`);
+        console.error(`[player] remote play failed: ${err?.message ?? err}`);
         set({ isPlaying: false });
       }
       return;
@@ -490,19 +501,16 @@ export const usePlayer = create<PlayerState>((set, get) => {
     },
 
     toggle() {
-      // When a Cast device is active, transport proxies to it — local
-      // <audio> element is paused and doesn't know the true play state.
-      // Use the store's isPlaying as the truth.
-      const castId = useCast.getState().activeDeviceId;
-      if (castId) {
+      // When a remote sink (Cast or HA) is active, transport proxies
+      // to it — local <audio> element is paused and doesn't know the
+      // true play state. The store's `isPlaying` is the truth.
+      const castId  = useCast.getState().activeDeviceId;
+      const haEntId = useHomeAssistant.getState().activeEntityId;
+      if (castId || haEntId) {
         const s = get();
-        if (s.isPlaying) {
-          void (window.mp as any).cast.pause();
-          set({ isPlaying: false });
-        } else {
-          void (window.mp as any).cast.resume();
-          set({ isPlaying: true });
-        }
+        const remote: any = castId ? (window.mp as any).cast : (window.mp as any).ha;
+        if (s.isPlaying) { void remote.pause();  set({ isPlaying: false }); }
+        else             { void remote.resume(); set({ isPlaying: true }); }
         return;
       }
 
@@ -558,14 +566,17 @@ export const usePlayer = create<PlayerState>((set, get) => {
       // The local <audio> element is paused and its currentTime is a stale
       // left-over from before the cast handoff; seeking it is a no-op that
       // the user sees as "rewind broke, speaker kept going."
-      const casting = !!useCast.getState().activeDeviceId;
-      const currentPos = casting ? s.position : engine.element.currentTime;
+      const castId  = useCast.getState().activeDeviceId;
+      const haEntId = useHomeAssistant.getState().activeEntityId;
+      const remoting = !!(castId || haEntId);
+      const currentPos = remoting ? s.position : engine.element.currentTime;
       if (currentPos > 3) {
-        if (casting) {
+        if (remoting) {
           set({ position: 0 });
           lastUserCastSeekAt = Date.now();
-          (window.mp as any).cast.seek(0).catch((err: any) => {
-            console.warn(`[player] prev→cast.seek(0) rejected: ${err?.message ?? err}`);
+          const remote: any = castId ? (window.mp as any).cast : (window.mp as any).ha;
+          remote.seek(0).catch((err: any) => {
+            console.warn(`[player] prev→remote.seek(0) rejected: ${err?.message ?? err}`);
           });
         } else {
           engine.seek(0);
@@ -607,11 +618,14 @@ export const usePlayer = create<PlayerState>((set, get) => {
       //      the track stopped. The subscriber filters to only
       //      PLAYING/PAUSED — the only two states that actually
       //      correspond to a user-visible intent.
-      if (useCast.getState().activeDeviceId) {
+      const castId  = useCast.getState().activeDeviceId;
+      const haEntId = useHomeAssistant.getState().activeEntityId;
+      if (castId || haEntId) {
         set({ position: sec });
         lastUserCastSeekAt = Date.now();
-        (window.mp as any).cast.seek(sec).catch((err: any) => {
-          console.warn(`[player] cast.seek(${sec}) rejected: ${err?.message ?? err}`);
+        const remote: any = castId ? (window.mp as any).cast : (window.mp as any).ha;
+        remote.seek(sec).catch((err: any) => {
+          console.warn(`[player] remote.seek(${sec}) rejected: ${err?.message ?? err}`);
         });
         return;
       }
@@ -640,12 +654,14 @@ export const usePlayer = create<PlayerState>((set, get) => {
       engine.setVolume(v);
       set({ volume: v });
       scheduleVolumeSave(v);
-      // Mirror to the active Cast device so the same slider controls
-      // whatever's actually making sound. Cast device runs its own
-      // hardware volume; we push the 0..1 normalised value and it
-      // scales to its own range.
+      // Mirror to whichever remote sink is active so the same slider
+      // controls whatever's actually making sound. Remote devices run
+      // their own hardware volume; we push the 0..1 normalised value
+      // and the receiver scales it to its native range.
       if (useCast.getState().activeDeviceId) {
         void (window.mp as any).cast.setVolume(v);
+      } else if (useHomeAssistant.getState().activeEntityId) {
+        void (window.mp as any).ha.setVolume(v);
       }
     },
     setLikedIds(ids) { set({ likedIds: new Set(ids) }); },
@@ -756,6 +772,32 @@ useCast.subscribe((cast) => {
   // Mirroring those into isPlaying makes the play/pause icon blink and
   // the user thinks playback stopped. Ignore them — the next PLAYING
   // or PAUSED tick will correct the UI if needed.
+  if (s.playerState === 'PLAYING') patch.isPlaying = true;
+  else if (s.playerState === 'PAUSED') patch.isPlaying = false;
+
+  if (Object.keys(patch).length > 0) usePlayer.setState(patch as any);
+});
+
+// --- Home Assistant status → player state bridge -----------------------------
+// Same logic as the Cast bridge above — we duplicate rather than abstract
+// because the two stores have different field names (deviceId vs entityId)
+// and different `active*` accessors, and splitting a tiny subscribe body
+// into a factory would obscure the grace-window + state-filtering rationale.
+useHomeAssistant.subscribe((ha) => {
+  const s = ha.lastStatus;
+  if (!s) return;
+  if (ha.activeEntityId !== s.entityId) return;
+
+  const patch: Partial<{ position: number; duration: number; isPlaying: boolean }> = {};
+
+  // `lastUserCastSeekAt` is misnamed now that HA seeks use the same
+  // latch, but sharing the timestamp is the whole point — one user
+  // action, one grace window, regardless of sink. Renaming would ripple
+  // through `seek()` / `prev()` for no behaviour change.
+  const withinSeekGrace = Date.now() - lastUserCastSeekAt < CAST_SEEK_GRACE_MS;
+  if (!withinSeekGrace && Number.isFinite(s.currentTime)) patch.position = s.currentTime;
+  if (typeof s.duration === 'number' && s.duration > 0) patch.duration = s.duration;
+
   if (s.playerState === 'PLAYING') patch.isPlaying = true;
   else if (s.playerState === 'PAUSED') patch.isPlaying = false;
 

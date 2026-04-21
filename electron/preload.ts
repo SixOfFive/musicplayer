@@ -132,6 +132,27 @@ const api = {
       return () => ipcRenderer.removeListener(IPC.CAST_STATUS, listener);
     },
   },
+  // Home Assistant sinks. Same surface as cast above, with one extra
+  // handler (`test`) for the settings panel's "Test connection" button.
+  // Never exposes the HA token to the renderer — the renderer passes
+  // it on `test` only (before it's persisted); for every other handler
+  // the main process reads the stored token itself.
+  ha: {
+    test: (baseUrl: string, token: string) => ipcRenderer.invoke(IPC.HA_TEST, baseUrl, token),
+    list: () => ipcRenderer.invoke(IPC.HA_LIST),
+    play: (entityId: string, filePath: string, meta?: unknown) => ipcRenderer.invoke(IPC.HA_PLAY, entityId, filePath, meta),
+    pause: () => ipcRenderer.invoke(IPC.HA_PAUSE),
+    resume: () => ipcRenderer.invoke(IPC.HA_RESUME),
+    stop: () => ipcRenderer.invoke(IPC.HA_STOP),
+    setVolume: (level: number) => ipcRenderer.invoke(IPC.HA_SET_VOLUME, level),
+    seek: (seconds: number) => ipcRenderer.invoke(IPC.HA_SEEK, seconds),
+    active: () => ipcRenderer.invoke(IPC.HA_ACTIVE),
+    onStatus: (cb: (payload: { entityId: string; currentTime: number; duration: number | null; playerState: string }) => void) => {
+      const listener = (_: unknown, p: any) => cb(p);
+      ipcRenderer.on(IPC.HA_STATUS, listener);
+      return () => ipcRenderer.removeListener(IPC.HA_STATUS, listener);
+    },
+  },
   convert: {
     checkAvailable: () => ipcRenderer.invoke(IPC.CONVERT_CHECK_AVAILABLE),
     albumToMp3: (albumId: number) => ipcRenderer.invoke(IPC.CONVERT_ALBUM_TO_MP3, albumId),

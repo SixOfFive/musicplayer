@@ -1,214 +1,29 @@
 // Google Cast (Chromecast / Nest Mini / Cast-enabled TVs & speakers)
-// support. Three moving parts collaborate here:
+// support. Two moving parts collaborate here:
 //
 //   1. mDNS discovery via `chromecast-api` — finds Cast devices on the
 //      local network, surfaces them as `CastDeviceRef` entries the
 //      renderer's output-picker can list alongside local audio sinks.
 //
-//   2. A tiny HTTP server (bound to 0.0.0.0 on a random free port)
-//      serves the currently-cast track to the Cast device. Cast
-//      receivers fetch media by URL — they don't accept pushed bytes —
-//      so our file-on-disk needs to be reachable at an http://lan-ip:PORT/...
-//      URL. We include a random per-session token in the path so any
-//      arbitrary LAN host can't browse the user's music: only the
-//      Cast device that received the URL can hit it.
-//
-//   3. Cast protocol (play / pause / volume / stop / seek) via the
+//   2. Cast protocol (play / pause / volume / stop / seek) via the
 //      same `chromecast-api` client. When the user picks a Cast device
 //      in the player bar, further transport commands proxy here.
+//
+// The HTTP media server that actually streams the current track to the
+// receiver lives in electron/services/media-server.ts — shared with
+// the Home Assistant service which needs the same mechanism.
 //
 // All of this lives in the main process. The renderer's player store
 // tests `castActive` before dispatching to the local `<audio>` element
 // and instead fires IPC when a Cast device owns playback.
-
-import http from 'node:http';
-import { createReadStream, statSync } from 'node:fs';
-import path from 'node:path';
-import os from 'node:os';
-import crypto from 'node:crypto';
 
 // `chromecast-api` has no TS types. The shape we use below is stable
 // across the 0.x versions we care about (tested against 0.5.x).
 // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
 const ChromecastAPI = require('chromecast-api');
 
-// ----------------------------------------------------------------------------
-// Local HTTP server for media delivery to Cast devices
-// ----------------------------------------------------------------------------
-//
-// Cast devices fetch by URL, so we need to expose the current track to
-// the LAN. Security constraints:
-//   - Bind to 0.0.0.0 (Cast device is a different host on the LAN)
-//   - Require a per-session random token in the URL path so a neighbour
-//     on the network can't enumerate / download your music library
-//   - Only serve the file we're currently casting — no directory listing,
-//     no arbitrary file access
-
-interface CastMediaServer {
-  port: number;
-  token: string;
-  stop(): Promise<void>;
-}
-
-let mediaServer: CastMediaServer | null = null;
-
-// Path currently eligible for serving. Set by `serveFile`, cleared on
-// stop. Any request for a different path returns 404 — blocks path
-// traversal and enumeration.
-let currentServePath: string | null = null;
-let currentServeMime: string = 'application/octet-stream';
-
-const MIME_BY_EXT: Record<string, string> = {
-  '.mp3': 'audio/mpeg',
-  '.flac': 'audio/flac',
-  '.wav': 'audio/wav',
-  '.m4a': 'audio/mp4',
-  '.aac': 'audio/aac',
-  '.ogg': 'audio/ogg',
-  '.opus': 'audio/ogg',
-  '.wma': 'audio/x-ms-wma',
-};
-
-async function ensureMediaServer(): Promise<CastMediaServer> {
-  if (mediaServer) return mediaServer;
-  const token = crypto.randomBytes(16).toString('hex');
-
-  const server = http.createServer((req, res) => {
-    try {
-      const url = new URL(req.url || '/', `http://${req.headers.host}`);
-      // URL shape: /cast/<token>/<ignored-filename.ext>
-      const parts = url.pathname.split('/').filter(Boolean);
-      if (parts.length < 2 || parts[0] !== 'cast' || parts[1] !== token) {
-        res.statusCode = 403;
-        res.end();
-        return;
-      }
-      if (!currentServePath) {
-        res.statusCode = 404;
-        res.end();
-        return;
-      }
-
-      const filePath = currentServePath;
-      const stat = statSync(filePath);
-      const size = stat.size;
-      const rangeHeader = req.headers.range || '';
-      const rm = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader);
-      let start = 0;
-      let end = size - 1;
-      let status = 200;
-      if (rm) {
-        start = rm[1] ? parseInt(rm[1], 10) : 0;
-        end = rm[2] ? Math.min(parseInt(rm[2], 10), size - 1) : size - 1;
-        if (start < 0 || end < start || end >= size) {
-          res.writeHead(416, { 'Content-Range': `bytes */${size}` });
-          res.end();
-          return;
-        }
-        status = 206;
-      }
-      const length = end - start + 1;
-      const headers: Record<string, string> = {
-        'Content-Type': currentServeMime,
-        'Content-Length': String(length),
-        'Accept-Ranges': 'bytes',
-      };
-      if (status === 206) headers['Content-Range'] = `bytes ${start}-${end}/${size}`;
-      res.writeHead(status, headers);
-      const stream = createReadStream(filePath, { start, end });
-      stream.on('error', () => { try { res.end(); } catch { /* noop */ } });
-      stream.pipe(res);
-    } catch {
-      try { res.statusCode = 500; res.end(); } catch { /* noop */ }
-    }
-  });
-
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(0, '0.0.0.0', () => resolve());
-  });
-  const addr = server.address();
-  const port = typeof addr === 'object' && addr ? addr.port : 0;
-
-  mediaServer = {
-    port,
-    token,
-    async stop() {
-      await new Promise<void>((r) => server.close(() => r()));
-      mediaServer = null;
-      currentServePath = null;
-    },
-  };
-  process.stdout.write(`[cast] media server listening on :${port}\n`);
-  return mediaServer;
-}
-
-/**
- * Find the best LAN IPv4 address to advertise to a Cast device. Cast
- * receivers fetch the media URL, so the address has to be reachable
- * from the device's subnet — and crucially NOT a VPN / CGNAT / link-
- * local interface the speaker has no route to.
- *
- * Real-world disaster avoided: user has Tailscale installed → its
- * interface hands out a 100.64.0.0/10 CGNAT IP → `os.networkInterfaces()`
- * enumeration puts Tailscale first → we'd happily tell the Nest speaker
- * "fetch from http://100.69.14.11:…" which the Nest cannot reach over
- * the LAN, so playback just silently never starts.
- *
- * Priority order (higher wins):
- *   3 — RFC1918 home-LAN ranges: 192.168/16, 172.16–31/12, 10/8
- *   2 — unmapped routable space (public IP on the interface) — possible
- *       if user is on a flat network without NAT, rare
- *   1 — anything else that isn't explicitly blocked below
- *   0 — explicitly skipped: loopback (127/8 — already filtered),
- *       link-local (169.254/16), CGNAT / shared address space
- *       (100.64/10 → covers Tailscale by default), IPv6 (can't be
- *       targeted by the Cast v2 receiver)
- *
- * The first interface matching the highest tier wins. Ties broken by
- * enumeration order, which is good enough for our single-machine case.
- */
-function firstLanIp(): string | null {
-  const ifaces = os.networkInterfaces();
-  const candidates: Array<{ address: string; rank: number; name: string }> = [];
-
-  for (const name of Object.keys(ifaces)) {
-    for (const i of ifaces[name] ?? []) {
-      if (i.family !== 'IPv4' || i.internal) continue;
-      const addr = i.address;
-
-      // Skip link-local and CGNAT entirely — Cast targets can never
-      // reach us through these. The CGNAT skip is specifically for
-      // Tailscale, Nebula, ZeroTier, and any other overlay that
-      // defaults to 100.64/10.
-      if (addr.startsWith('169.254.')) continue;
-      if (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(addr)) continue;
-
-      // Real home-LAN ranges — prefer these.
-      const isPrivate =
-        addr.startsWith('192.168.') ||
-        addr.startsWith('10.') ||
-        /^172\.(1[6-9]|2\d|3[01])\./.test(addr);
-
-      candidates.push({ address: addr, rank: isPrivate ? 3 : 1, name });
-    }
-  }
-
-  candidates.sort((a, b) => b.rank - a.rank);
-  if (candidates.length === 0) return null;
-  const winner = candidates[0];
-  process.stdout.write(`[cast] LAN IP candidates: ${candidates.map((c) => `${c.address} (${c.name}, rank=${c.rank})`).join(', ')} → using ${winner.address}\n`);
-  return winner.address;
-}
-
-function urlForServedFile(filePath: string): string {
-  const m = mediaServer;
-  if (!m) throw new Error('Media server not running');
-  const ip = firstLanIp();
-  if (!ip) throw new Error('No LAN IP available to advertise to Cast device');
-  const filename = encodeURIComponent(path.basename(filePath));
-  return `http://${ip}:${m.port}/cast/${m.token}/${filename}`;
-}
+import path from 'node:path';
+import { ensureMediaServer, setCurrentServePath, urlForServedFile, MIME_BY_EXT } from './media-server';
 
 // ----------------------------------------------------------------------------
 // Device discovery + control
@@ -340,12 +155,10 @@ function requireDevice(id: string): RawCastDevice {
 export async function castPlay(deviceId: string, filePath: string, meta?: { title?: string; artist?: string; album?: string; coverUrl?: string }): Promise<void> {
   const device = requireDevice(deviceId);
   await ensureMediaServer();
-
-  currentServePath = filePath;
-  const ext = path.extname(filePath).toLowerCase();
-  currentServeMime = MIME_BY_EXT[ext] ?? 'application/octet-stream';
+  setCurrentServePath(filePath);
 
   const url = urlForServedFile(filePath);
+  const contentType = MIME_BY_EXT[path.extname(filePath).toLowerCase()] ?? 'application/octet-stream';
   process.stdout.write(`[cast] play → ${device.friendlyName || device.host} :: ${url}\n`);
 
   return new Promise((resolve, reject) => {
@@ -355,7 +168,7 @@ export async function castPlay(deviceId: string, filePath: string, meta?: { titl
     // Google Home app). Fall back to plain URL on audio-only targets.
     const media = {
       url,
-      contentType: currentServeMime,
+      contentType,
       media: meta
         ? {
             metadata: {
@@ -485,7 +298,11 @@ export async function castStop(): Promise<void> {
   if (!activeDeviceKey) return;
   const d = devicesByKey.get(activeDeviceKey);
   activeDeviceKey = null;
-  currentServePath = null;
+  // Note: we deliberately don't null out the media server's serve-path
+  // here — if the user immediately picks a different sink (HA entity
+  // or another Cast device), the next setCurrentServePath call will
+  // take over. Clearing the path here would create a window where a
+  // mid-flight receiver request returns 404.
   if (!d) return;
   await new Promise<void>((resolve) => d.stop(() => resolve()));
 }

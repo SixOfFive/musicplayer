@@ -40,6 +40,15 @@ function defaults(): AppSettings {
       scrobbleEnabled: true,
       minScrobbleSec: 30,
     },
+    homeAssistant: {
+      // Disabled until the user fills in baseUrl + token. Discovery,
+      // state polling, and the HA section of the output picker all
+      // short-circuit to empty when `enabled === false` so an unset
+      // HA never takes the app near the network.
+      enabled: false,
+      baseUrl: '',
+      token: '',
+    },
     library: {
       directories: [],
       databasePath: path.join(userData, 'library.db'),

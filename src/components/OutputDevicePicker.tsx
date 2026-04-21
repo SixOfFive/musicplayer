@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getAudioEngine } from '../audio/AudioEngine';
 import { useCast } from '../store/cast';
+import { useHomeAssistant } from '../store/homeassistant';
 import { usePlayer } from '../store/player';
 
 /**
@@ -126,13 +127,20 @@ export default function OutputDevicePicker() {
     setSelectedId(id);
     setOpen(false);
     await applyDevice(id);
-    // Picking a LOCAL device stops any active Cast session — we can
-    // only play through one sink at a time.
-    const cast = useCast.getState();
-    if (cast.activeDeviceId) {
-      try { await (window.mp as any).cast.stop(); } catch { /* noop */ }
-      cast.setActive(null);
-    }
+    // Picking a LOCAL device stops any active remote session — we can
+    // only play through one sink at a time. Fire BOTH stop IPCs
+    // unconditionally rather than branching on the renderer's active
+    // state: main is the source of truth about whether a remote
+    // target is really playing, and its stop functions are no-ops
+    // when nothing's active. Gating on the renderer state produces
+    // the "I can't stop playback" bug where a play-failure had nulled
+    // the renderer's active id while main was still playing on the
+    // previous target.
+    try { await (window.mp as any).cast.stop(); } catch { /* noop */ }
+    try { await (window.mp as any).ha.stop(); }   catch { /* noop */ }
+    useCast.getState().setActive(null);
+    useHomeAssistant.getState().setActive(null);
+    useHomeAssistant.getState().setError(null);
     // Persist so the choice survives restart. `as any` to bypass the
     // settings type check — outputDevice is nullable in the schema.
     void window.mp.settings.set({ playback: { outputDevice: id } } as any);
@@ -150,6 +158,14 @@ export default function OutputDevicePicker() {
     const player = usePlayer.getState();
     const current = player.queue[player.index];
     console.log(`[cast-picker] picked deviceId=${deviceId} | hasCurrent=${!!current} | queueLen=${player.queue.length} | index=${player.index}`);
+
+    // Fire stops unconditionally — see the note in `pick()`. One remote
+    // sink at a time, so any previously-active target (whether Cast or
+    // HA, whether the renderer knows about it or not) gets hushed.
+    try { await (window.mp as any).ha.stop(); }   catch { /* noop */ }
+    try { await (window.mp as any).cast.stop(); } catch { /* noop */ }
+    useHomeAssistant.getState().setActive(null);
+    useHomeAssistant.getState().setError(null);
     useCast.getState().setActive(deviceId);
 
     // Pause the local engine so the laptop speakers don't double-play.
@@ -180,6 +196,64 @@ export default function OutputDevicePicker() {
     }
   }
 
+  /**
+   * Selecting a Home Assistant `media_player.*` entity routes the
+   * current track through HA's REST API. HA handles whatever protocol
+   * the underlying speaker speaks (Sonos, AirPlay, Squeezebox, Snapcast,
+   * MusicAssistant, …) on its side; we just POST the URL + entity_id.
+   *
+   * Mirrors `pickCast`: stops the opposite remote first, pauses local,
+   * handles the no-queue case, reverts on failure.
+   */
+  async function pickHa(entityId: string) {
+    setOpen(false);
+    const player = usePlayer.getState();
+    const current = player.queue[player.index];
+    console.log(`[ha-picker] picked entityId=${entityId} | hasCurrent=${!!current} | queueLen=${player.queue.length} | index=${player.index}`);
+
+    // Stop everything else before starting the new target — unconditionally,
+    // regardless of renderer-side state. Includes stopping a previous HA
+    // entity when switching between HA speakers (main's haStop sends
+    // media_stop to whatever entity is currently active, so the old
+    // speaker goes silent before the new one starts).
+    try { await (window.mp as any).cast.stop(); } catch { /* noop */ }
+    try { await (window.mp as any).ha.stop(); }   catch { /* noop */ }
+    useCast.getState().setActive(null);
+    useHomeAssistant.getState().setError(null);
+    // Optimistically mark the new target active. If play_media fails
+    // below we'll null it out — by then the old target has already been
+    // stopped above, so the end state (silence) is coherent.
+    useHomeAssistant.getState().setActive(entityId);
+
+    try { getAudioEngine().pause(); } catch { /* noop */ }
+
+    if (!current) {
+      console.log('[ha-picker] no current track — HA active, waiting for user to start a track');
+      return;
+    }
+
+    try {
+      console.log(`[ha-picker] starting HA cast of "${current.title}" to ${entityId}`);
+      await (window.mp as any).ha.play(entityId, current.path, {
+        title: current.title,
+        artist: current.artist ?? undefined,
+        album: current.album ?? undefined,
+      });
+      usePlayer.setState({ isPlaying: true });
+      console.log(`[ha-picker] ha.play resolved`);
+    } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      console.error(`[ha-picker] couldn't start HA playback: ${msg}`);
+      useHomeAssistant.getState().setActive(null);
+      // Surface the reason into the picker so a Roku rejecting audio
+      // or a Sonos on cooldown isn't just a silent no-op. Trimmed to
+      // keep the dropdown compact — the full stack is already in the
+      // main-process log if someone needs it.
+      const short = msg.length > 140 ? `${msg.slice(0, 140)}…` : msg;
+      useHomeAssistant.getState().setError(`${entityId} rejected playback: ${short}`);
+    }
+  }
+
   // Subscribe to Cast state so the UI reflects which device (if any)
   // is currently receiving playback AND the current discovery status
   // (used to tint the speaker icon: green=devices found, orange=still
@@ -188,30 +262,54 @@ export default function OutputDevicePicker() {
   const castActive = useCast((s) => s.activeDeviceId);
   const castStatus = useCast((s) => s.status);
 
-  // Build a friendly label for the currently-selected device. When
-  // casting, that trumps the local selection in the button title.
+  // Same for Home Assistant entities. Unlike Cast we don't background-
+  // poll the entity list — HA entities don't come and go the way
+  // mDNS-announced speakers do, so we only hit /api/states when the
+  // picker is open. See the open-gated useEffect below.
+  const haEntities     = useHomeAssistant((s) => s.entities);
+  const haActive       = useHomeAssistant((s) => s.activeEntityId);
+  const haStatus       = useHomeAssistant((s) => s.status);
+  const haError        = useHomeAssistant((s) => s.lastError);
+  const refreshHa      = useHomeAssistant((s) => s.refreshEntities);
+
+  // Refresh the HA entity list when the dropdown opens, and every 15s
+  // while it remains open — that's enough to pick up an HA restart or
+  // a newly-added speaker without being chatty when the picker isn't
+  // being looked at. When closed, zero HA traffic.
+  useEffect(() => {
+    if (!open) return;
+    void refreshHa();
+    const t = setInterval(() => { void refreshHa(); }, 15000);
+    return () => clearInterval(t);
+  }, [open, refreshHa]);
+
+  // Build a friendly label for the currently-selected device. A remote
+  // sink (Cast or HA) trumps the local selection in the button title.
   const activeCastDevice = castActive ? castDevices.find((c) => c.id === castActive) : null;
-  const currentLabel = activeCastDevice
-    ? `Cast → ${activeCastDevice.name}`
-    : selectedId === DEFAULT_ID
-      ? 'System default'
-      : devices.find((d) => d.deviceId === selectedId)?.label
-        || 'Unknown device';
+  const activeHaEntity   = haActive   ? haEntities.find((e) => e.id === haActive) : null;
+  const currentLabel =
+    activeCastDevice ? `Cast → ${activeCastDevice.name}` :
+    activeHaEntity   ? `HA → ${activeHaEntity.name}` :
+    selectedId === DEFAULT_ID ? 'System default' :
+    devices.find((d) => d.deviceId === selectedId)?.label || 'Unknown device';
 
   return (
     <div ref={rootRef} className="relative">
       <button
         onClick={() => setOpen((v) => !v)}
-        title={buildIconTitle(currentLabel, castStatus, castDevices.length, !!castActive)}
+        title={buildIconTitle(currentLabel, castStatus, castDevices.length, !!castActive, haStatus, haEntities.length, !!haActive)}
         aria-label={`Output device (currently ${currentLabel})`}
         className={`p-1 transition ${open ? 'text-white' : 'text-text-secondary hover:text-white'}`}
       >
-        {/* Speaker / output glyph. A tiny "status dot" overlay conveys
-            Cast discovery state at a glance without needing to open the
-            dropdown: amber=still searching, green=devices found,
-            red=discovery errored. If a Cast device is actively playing,
-            the dot goes accent-yellow (distinct from "idle/found"
-            green) so the user can tell "ready to cast" vs "casting now". */}
+        {/* Speaker / output glyph. Tiny "status dot" overlay conveys
+            remote-sink state at a glance without opening the dropdown:
+              accent      — a remote sink is actively playing (Cast or HA)
+              emerald     — devices/entities found but nothing chosen
+              amber pulse — still searching / connecting
+              red         — discovery errored
+              transparent — nothing discovered, nothing configured
+            If both Cast AND HA have signals, Cast wins the dot (it's
+            the more visible use-case). */}
         <span className="relative inline-flex">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor" />
@@ -220,13 +318,13 @@ export default function OutputDevicePicker() {
           </svg>
           <span
             className={`absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full ring-1 ring-bg-elev-1 ${
-              castActive
+              (castActive || haActive)
                 ? 'bg-accent'
-                : castStatus === 'found'
+                : (castStatus === 'found' || haStatus === 'ready')
                   ? 'bg-emerald-400'
-                  : castStatus === 'error'
+                  : (castStatus === 'error' || haStatus === 'error')
                     ? 'bg-red-500'
-                    : castStatus === 'searching'
+                    : (castStatus === 'searching' || haStatus === 'connecting')
                       ? 'bg-amber-400 animate-pulse'
                       : 'bg-transparent ring-0'
             }`}
@@ -244,10 +342,28 @@ export default function OutputDevicePicker() {
             Audio output
           </div>
 
+          {/* Transient error banner — shown when the last remote play
+              attempt failed (e.g. Roku rejecting audio, Sonos
+              unresponsive, HA's own media_seek returning 500 on an
+              integration that lies about SEEK support). Dismissable by
+              clicking; auto-clears when the user picks a working sink. */}
+          {haError && (
+            <div className="mx-2 my-1 p-2 rounded bg-red-500/10 border border-red-500/30 text-[11px] text-red-200">
+              <div className="flex items-start gap-2">
+                <span className="flex-1 break-words">{haError}</span>
+                <button
+                  onClick={() => useHomeAssistant.getState().setError(null)}
+                  className="text-red-200/60 hover:text-red-100 flex-shrink-0"
+                  title="Dismiss"
+                >✕</button>
+              </div>
+            </div>
+          )}
+
           <DeviceRow
             label="System default"
             sublabel="Follow the OS audio setting"
-            active={selectedId === DEFAULT_ID && !castActive}
+            active={selectedId === DEFAULT_ID && !castActive && !haActive}
             onPick={() => pick(DEFAULT_ID)}
           />
 
@@ -260,7 +376,7 @@ export default function OutputDevicePicker() {
               <DeviceRow
                 key={d.deviceId}
                 label={d.label || 'Unnamed output'}
-                active={selectedId === d.deviceId && !castActive}
+                active={selectedId === d.deviceId && !castActive && !haActive}
                 onPick={() => pick(d.deviceId)}
               />
             ))}
@@ -295,6 +411,44 @@ export default function OutputDevicePicker() {
               })}
             </>
           )}
+
+          {/* Home Assistant media_player entities. HA itself is the
+              protocol abstraction for speakers it manages — Sonos,
+              AirPlay, Squeezebox, MusicAssistant, AVR, etc. — so one
+              section here gets us access to every speaker the user's
+              HA install knows about. The section is hidden entirely
+              when HA isn't configured or returns nothing (status 'idle'
+              with zero entities is the natural "nothing to show" case). */}
+          {haEntities.length > 0 && (
+            <>
+              <div className="mt-1 px-3 py-1.5 text-[10px] uppercase tracking-wider text-text-muted border-t border-white/5">
+                Home Assistant
+              </div>
+              {haEntities.map((e) => (
+                <DeviceRow
+                  key={e.id}
+                  label={`🏠 ${e.name}`}
+                  // Sublabel shows the HA state so the user knows at a
+                  // glance whether something else is already using that
+                  // speaker (e.g. "playing"), helping them avoid kicking
+                  // a roommate off the Sonos mid-song.
+                  sublabel={e.state === 'unknown' || e.state === 'idle' ? e.id : `${e.state} · ${e.id}`}
+                  active={haActive === e.id}
+                  onPick={() => pickHa(e.id)}
+                />
+              ))}
+            </>
+          )}
+
+          {/* Setup hint, shown only when HA is misconfigured / unreachable
+              AND the user hasn't got any Cast devices to distract them
+              (if they have Cast working, they probably don't care about
+              HA yet). */}
+          {haStatus === 'error' && haEntities.length === 0 && (
+            <div className="mt-1 px-3 py-2 text-[10px] text-text-muted border-t border-white/5">
+              Home Assistant unreachable — check Settings → Home Assistant.
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -303,24 +457,30 @@ export default function OutputDevicePicker() {
 
 /**
  * Compose the tooltip shown when the user hovers the speaker icon.
- * Surfaces BOTH the current output (local or cast) AND the current
- * discovery state so a user who's wondering "why can't I see my Nest
- * Mini yet?" gets an answer without opening the dropdown.
+ * Surfaces BOTH the current output (local / cast / HA) AND discovery
+ * state for each remote sink so a user wondering "why can't I see my
+ * Nest / Sonos yet?" gets an answer without opening the dropdown.
  */
 function buildIconTitle(
   current: string,
-  status: import('../store/cast').CastStatus,
-  deviceCount: number,
+  castStatus: import('../store/cast').CastStatus,
+  castCount: number,
   casting: boolean,
+  haStatus: import('../store/homeassistant').HaStatus,
+  haCount: number,
+  haActive: boolean,
 ): string {
   const head = `Output: ${current}`;
-  if (casting) return head; // Active cast — the header line is enough
-  const tail =
-    status === 'found' ? `${deviceCount} Cast device${deviceCount === 1 ? '' : 's'} available`
-    : status === 'searching' ? 'Searching for Cast devices on your network…'
-    : status === 'error' ? 'Cast discovery failed (check your network / firewall)'
-    : ''; // idle — no extra info yet
-  return tail ? `${head}\n${tail}` : head;
+  // Active remote sink — the header line tells the whole story.
+  if (casting || haActive) return head;
+  const lines: string[] = [head];
+  if (castStatus === 'found') lines.push(`${castCount} Cast device${castCount === 1 ? '' : 's'} available`);
+  else if (castStatus === 'searching') lines.push('Searching for Cast devices on your network…');
+  else if (castStatus === 'error') lines.push('Cast discovery failed (check your network / firewall)');
+  if (haStatus === 'ready') lines.push(`${haCount} Home Assistant speaker${haCount === 1 ? '' : 's'} available`);
+  else if (haStatus === 'connecting') lines.push('Connecting to Home Assistant…');
+  else if (haStatus === 'error') lines.push('Home Assistant unreachable');
+  return lines.join('\n');
 }
 
 function DeviceRow({
