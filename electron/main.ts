@@ -19,12 +19,40 @@ import { registerRadioIpc } from './ipc/radio';
 import { registerLastFmIpc } from './ipc/lastfm';
 import { registerCastIpc } from './ipc/cast';
 import { registerHomeAssistantIpc } from './ipc/homeassistant';
+import { registerDlnaIpc } from './ipc/dlna';
+import { startDlnaDiscovery, startDlnaReceiver } from './services/dlna';
 import { setAutoUpdaterWindow } from './services/updater';
 import { importPlaylistsFromFolder } from './services/playlist-export';
 import { initDatabase } from './services/db';
 import { initSettings, getSettings } from './services/settings-store';
 
 const isDev = !app.isPackaged;
+
+/**
+ * Soft-fail wrapper for add-on initialisers. Every non-essential
+ * subsystem (Cast, Home Assistant, DLNA sender, DLNA receiver) is
+ * registered via this helper so a failure at register time — missing
+ * native module, network binding refused, malformed settings — logs
+ * and returns instead of throwing and aborting app startup.
+ *
+ * Essential services (DB, settings, IPC for the local library) stay
+ * un-wrapped because if they fail there's no useful app to run anyway.
+ */
+function safeInit(label: string, fn: () => void): void {
+  try { fn(); }
+  catch (err: any) {
+    process.stdout.write(`[soft-fail] ${label}: ${err?.message ?? err}\n${err?.stack ?? ''}\n`);
+  }
+}
+function safeInitAsync(label: string, fn: () => Promise<unknown>): void {
+  try {
+    Promise.resolve(fn()).catch((err: any) => {
+      process.stdout.write(`[soft-fail] ${label} (async): ${err?.message ?? err}\n${err?.stack ?? ''}\n`);
+    });
+  } catch (err: any) {
+    process.stdout.write(`[soft-fail] ${label} (sync throw): ${err?.message ?? err}\n`);
+  }
+}
 
 // Must be called BEFORE app.ready. `corsEnabled` + a real host in the URL is
 // what stops Chromium's HTMLMediaElement from rejecting the source with
@@ -447,8 +475,20 @@ app.whenReady().then(async () => {
   registerUpdateIpc(ipcMain);
   registerRadioIpc(ipcMain, () => mainWindow);
   registerLastFmIpc(ipcMain);
-  registerCastIpc(ipcMain, () => mainWindow);
-  registerHomeAssistantIpc(ipcMain, () => mainWindow);
+  // Remote-sink add-ons (Cast / Home Assistant / DLNA). Each one is
+  // registered behind a soft-fail guard so a broken add-on can't take
+  // the whole app down. If chromecast-api fails to load on a weird
+  // platform, or HA's IPC throws at register time, or node-ssdp can't
+  // bind the multicast socket because a corporate firewall has closed
+  // UDP 1900 — the user still gets a working local-playback app.
+  safeInit('cast-ipc',           () => registerCastIpc(ipcMain, () => mainWindow));
+  safeInit('homeassistant-ipc',  () => registerHomeAssistantIpc(ipcMain, () => mainWindow));
+  safeInit('dlna-ipc',           () => registerDlnaIpc(ipcMain, () => mainWindow));
+  // Kick off DLNA discovery + advertise this app as a renderer. Both
+  // are fire-and-forget from main's perspective; the IPC listeners
+  // above are already wired to relay state/progress as it arrives.
+  safeInit('dlna-discovery',     () => startDlnaDiscovery());
+  safeInitAsync('dlna-receiver', () => startDlnaReceiver(`MusicPlayer on ${require('node:os').hostname()}`));
   setAutoUpdaterWindow(() => mainWindow);
 
   // Debug: toggle DevTools on demand (used by Settings → About & Updates).

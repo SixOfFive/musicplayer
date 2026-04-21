@@ -27,9 +27,11 @@
     "ffmpeg-static": "^5.2.0",
     "hls.js": "^1.6.16",
     "music-metadata": "^10.5.0",
+    "node-ssdp": "^4.0.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.26.0",
+    "xml2js": "^0.4.23",
     "zustand": "^4.5.4"
   },
   "devDependencies": {

@@ -218,10 +218,16 @@ npm run electron:build      # produces platform installer via electron-builder
 - Back/Forward buttons in TopBar track a proper history stack; scroll position restored per page so Back returns you to exactly where you left off
 
 ### Audio output routing
-- **Speaker icon next to the volume slider** opens an output-device picker with every local sink the OS exposes (`setSinkId` against `navigator.mediaDevices.enumerateDevices`) and every Google Cast target on the LAN.
-- **Local devices**: System default + every named playback device (Bluetooth headphones, USB DACs, specific HDMI outputs). Selection persists across restarts and falls back to System default if the previously-chosen device has been unplugged.
-- **Google Cast / Nest / Chromecast**: devices are discovered via mDNS and listed in the same dropdown. Picking one pauses the local audio element and streams the currently-playing track to the receiver through a token-protected HTTP server on a random port. Play/pause, scrubber, and volume slider all proxy to the Cast device; the scrubber syncs with the device at 1 Hz. Switching back to a local device stops the cast session cleanly.
-- **CGNAT-aware LAN IP picking**: the Cast media server advertises the first RFC1918 address (192.168 / 10 / 172.16-31), deprioritizing Tailscale's 100.64/10 range and link-local so speakers always receive a reachable URL even when Tailscale is running.
+- **Speaker icon next to the volume slider** opens an output-device picker with four grouped sections — local sinks, Google Cast / Nest, Home Assistant media_player entities, and DLNA / UPnP MediaRenderers — all in the same dropdown. Exactly one sink at a time; switching between them stops the previous cleanly.
+- **Local devices**: System default + every named playback device (Bluetooth headphones, USB DACs, specific HDMI outputs) via `setSinkId` against `navigator.mediaDevices.enumerateDevices`. Selection persists across restarts and falls back to System default if the previously-chosen device has been unplugged.
+- **Google Cast / Nest / Chromecast**: discovered via mDNS. Picking one pauses the local audio element and streams the current track to the receiver through a token-protected HTTP server on a random port. Play/pause, scrubber, and volume slider all proxy to the Cast device; the scrubber syncs with the device at 1 Hz. Uses `device.seekTo` (absolute) so clicks on the scrubber land where you click, not relative to the current position.
+- **Home Assistant**: every `media_player.*` entity HA exposes — Sonos, AirPlay, Squeezebox, MusicAssistant, Snapcast, smart AVRs, HA Preview speakers — becomes a valid sink via one REST integration. Configured in Settings → Home Assistant with a long-lived access token. Token is stored only in `userData/settings.json`, never logged (error messages run through a token-scrubbing wrapper before surfacing), and shown as a masked placeholder with last-4 hint in the UI.
+- **DLNA / UPnP MediaRenderer (bidirectional)**:
+  - *Sender* — discovers renderers on the LAN via SSDP (VLC's built-in renderer, Kodi boxes, smart TVs, DLNA-capable hi-fi, HA's `media_player.dlna_dmr` entities). Picks via SOAP AVTransport: SetAVTransportURI + Play + Stop + Seek + SetVolume. 1 Hz GetPositionInfo poll drives the scrubber. Rescan on every picker-open so the scan indicator is visible when you're looking at the dropdown.
+  - *Receiver* — this app advertises itself as a MediaRenderer, so VLC's "Render to…", BubbleUPnP, HA's `dlna_dmr` integration, etc. can cast TO us. We host the UPnP device description + SOAP action handlers + SSDP NOTIFY announcements. Incoming media URLs arrive via IPC and play through the shared `<audio>` element.
+  - *Progress indication* — opening the picker triggers a 6-second scan window with a spinner + progress bar in the DLNA section header so you always see the scan firing.
+- **CGNAT-aware LAN IP picking**: the shared media server advertises the first RFC1918 address (192.168 / 10 / 172.16-31), deprioritizing Tailscale's 100.64/10 range and link-local so speakers always receive a reachable URL even when Tailscale is running.
+- **Soft-fail add-ons**: each remote sink (Cast, HA, DLNA sender, DLNA receiver) is registered behind a try/catch guard at app startup, so one integration failing (bad token, firewall blocking SSDP multicast, chromecast-api load error on a weird platform) can't take the whole app down. Failures log with a `[soft-fail]` prefix; the rest of the app keeps working.
 
 ### Playlists (universal .m3u8 format)
 - **Left-sidebar "Playlists" tab** → dedicated grid view with Export-all / Import-from-folder buttons
@@ -358,8 +364,15 @@ electron/                   Main process
     playlist-export.ts      M3U8 write / parse / import orchestrator
     fs-fallback.ts          statWithFallback — SMB trailing-dot / case-drift recovery
     image-cache.ts          LRU thumbnail cache + on-disk persistence across restarts
-    cast.ts                 mDNS discovery, token-protected HTTP media server, Cast
-                            transport (play/pause/seekTo/volume) + 1 Hz status poll
+    media-server.ts         Shared token-protected HTTP server used by Cast / HA /
+                            DLNA sender; CGNAT-aware LAN IP picker lives here too
+    cast.ts                 mDNS discovery + Cast transport (seekTo/pause/resume/
+                            volume) + 1 Hz status poll
+    homeassistant.ts        HA REST client: entity list, play_media, media_seek,
+                            state poll. Token-scrubbing on every error message.
+    dlna.ts                 SSDP discovery + SOAP controller (sender) AND a UPnP
+                            MediaRenderer receiver (AVTransport + RenderingControl
+                            + ConnectionManager service stubs, SSDP NOTIFY advertising)
   ipc/
     library.ts              tracks / albums / artists / stats / delete / artist detail
     scan.ts                 Recursive walk + tag parse + background art fetch
@@ -371,6 +384,12 @@ electron/                   Main process
     visualizer.ts           Plugin discovery (built-in + bundled Milkdrop + user dirs)
     cast.ts                 Cast IPC bridge (list / play / pause / resume / stop /
                             setVolume / seek / onStatus)
+    homeassistant.ts        HA IPC bridge (test / list / play / pause / resume /
+                            stop / setVolume / seek / onStatus)
+    dlna.ts                 DLNA IPC bridge (list / rescan / play / pause / resume /
+                            stop / setVolume / seek / onStatus / onScanProgress /
+                            onIncoming — the last two for discovery progress
+                            indication and receiver-side push)
 shared/
   types.ts                  Shared TS types + IPC channel names
 src/
@@ -380,7 +399,7 @@ src/
     host.ts                 Canvas lifecycle + rAF loop
     backends/builtin.ts     Canvas2D built-ins
     backends/milkdrop.ts    butterchurn wrapper
-  store/                    Zustand (player, library, convert, cast)
+  store/                    Zustand (player, library, convert, cast, homeassistant, dlna)
   hooks/                    useScanProgress, useLibraryRefresh
   lib/mediaUrl.ts           Build mp-media:// URLs
   components/               Sidebar, TopBar, NowPlayingBar, TrackRow, AlbumCard,

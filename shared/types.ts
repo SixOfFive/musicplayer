@@ -325,6 +325,24 @@ export const IPC = {
   HA_SEEK: 'ha:seek',
   HA_ACTIVE: 'ha:active',
   HA_STATUS: 'ha:status', // main → renderer push
+  // DLNA / UPnP MediaRenderer. Both directions:
+  //   - Sender: discover LAN renderers + drive one via SOAP AVTransport.
+  //   - Receiver: this app advertises itself as a renderer; incoming
+  //     media URLs arrive via DLNA_INCOMING and we play through the
+  //     same <audio> element.
+  DLNA_LIST:          'dlna:list',
+  DLNA_RESCAN:        'dlna:rescan',
+  DLNA_PLAY:          'dlna:play',
+  DLNA_PAUSE:         'dlna:pause',
+  DLNA_RESUME:        'dlna:resume',
+  DLNA_STOP:          'dlna:stop',
+  DLNA_SET_VOLUME:    'dlna:set-volume',
+  DLNA_SEEK:          'dlna:seek',
+  DLNA_ACTIVE:        'dlna:active',
+  DLNA_STATUS:        'dlna:status',    // main → renderer push (sender status)
+  DLNA_SCAN:          'dlna:scan',      // main → renderer push (discovery progress)
+  DLNA_INCOMING:      'dlna:incoming',  // main → renderer push (receiver got a URL)
+  DLNA_RECEIVER_STATE:'dlna:receiver-state', // renderer → main (our <audio> state for sender-facing responses)
   // Playback helpers
   PLAYBACK_FILE_URL: 'playback:file-url',
   // Visualizer plugins
@@ -639,6 +657,45 @@ export interface HaStatusUpdate {
   currentTime: number;
   duration: number | null;
   playerState: 'PLAYING' | 'PAUSED' | 'BUFFERING' | 'IDLE' | 'UNKNOWN';
+}
+
+/** A DLNA MediaRenderer discovered on the LAN. Same row shape as Cast/HA
+ *  so the output picker can render all three sink kinds with one row
+ *  component. `id` is the device's UDN (uuid:… string). */
+export interface DlnaDeviceRef {
+  id: string;
+  name: string;
+  host: string;
+  manufacturer?: string;
+  modelName?: string;
+}
+
+/** DLNA status push, matching Cast/HA shape. */
+export interface DlnaStatusUpdate {
+  deviceId: string;
+  currentTime: number;
+  duration: number | null;
+  playerState: 'PLAYING' | 'PAUSED' | 'BUFFERING' | 'IDLE' | 'UNKNOWN';
+}
+
+/** Progress tick published during initial DLNA discovery. Drives the
+ *  "scanning for speakers" indicator in the picker dropdown. */
+export interface DlnaScanProgress {
+  elapsedMs: number;
+  totalMs: number;
+  found: number;
+  done: boolean;
+}
+
+/** Media push from a remote DLNA sender (VLC's "Render to..." etc.).
+ *  Main forwards this to the renderer, which loads the URL into the
+ *  shared <audio> element the same way a local track or radio stream
+ *  would be. */
+export interface DlnaIncomingMedia {
+  uri: string;
+  title?: string;
+  artist?: string;
+  album?: string;
 }
 
 export interface LargestAlbum {

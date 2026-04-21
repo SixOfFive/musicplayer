@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { getAudioEngine } from '../audio/AudioEngine';
 import { useCast } from './cast';
 import { useHomeAssistant } from './homeassistant';
+import { useDlna } from './dlna';
 
 /**
  * Timestamp of the most recent user-initiated Cast seek. The status
@@ -206,9 +207,10 @@ export const usePlayer = create<PlayerState>((set, get) => {
     // id at any time (OutputDevicePicker enforces that by stopping one
     // before activating the other). If nothing's picked we fall through
     // to local playback via the shared <audio> element.
-    const castId  = useCast.getState().activeDeviceId;
-    const haEntId = useHomeAssistant.getState().activeEntityId;
-    if (castId || haEntId) {
+    const castId   = useCast.getState().activeDeviceId;
+    const haEntId  = useHomeAssistant.getState().activeEntityId;
+    const dlnaId   = useDlna.getState().activeDeviceId;
+    if (castId || haEntId || dlnaId) {
       // Pause local in case a previous track was still on it.
       try { engine.pause(); } catch { /* noop */ }
       if (typeof cur.durationSec === 'number' && cur.durationSec > 0) {
@@ -226,6 +228,12 @@ export const usePlayer = create<PlayerState>((set, get) => {
           });
         } else if (haEntId) {
           await (window.mp as any).ha.play(haEntId, cur.path, {
+            title: cur.title,
+            artist: cur.artist ?? undefined,
+            album: cur.album ?? undefined,
+          });
+        } else if (dlnaId) {
+          await (window.mp as any).dlna.play(dlnaId, cur.path, {
             title: cur.title,
             artist: cur.artist ?? undefined,
             album: cur.album ?? undefined,
@@ -501,14 +509,18 @@ export const usePlayer = create<PlayerState>((set, get) => {
     },
 
     toggle() {
-      // When a remote sink (Cast or HA) is active, transport proxies
-      // to it — local <audio> element is paused and doesn't know the
-      // true play state. The store's `isPlaying` is the truth.
+      // When a remote sink (Cast / HA / DLNA) is active, transport
+      // proxies to it — local <audio> element is paused and doesn't
+      // know the true play state. The store's `isPlaying` is the truth.
       const castId  = useCast.getState().activeDeviceId;
       const haEntId = useHomeAssistant.getState().activeEntityId;
-      if (castId || haEntId) {
+      const dlnaId  = useDlna.getState().activeDeviceId;
+      if (castId || haEntId || dlnaId) {
         const s = get();
-        const remote: any = castId ? (window.mp as any).cast : (window.mp as any).ha;
+        const remote: any =
+          castId  ? (window.mp as any).cast :
+          haEntId ? (window.mp as any).ha   :
+                    (window.mp as any).dlna;
         if (s.isPlaying) { void remote.pause();  set({ isPlaying: false }); }
         else             { void remote.resume(); set({ isPlaying: true }); }
         return;
@@ -566,15 +578,19 @@ export const usePlayer = create<PlayerState>((set, get) => {
       // The local <audio> element is paused and its currentTime is a stale
       // left-over from before the cast handoff; seeking it is a no-op that
       // the user sees as "rewind broke, speaker kept going."
-      const castId  = useCast.getState().activeDeviceId;
-      const haEntId = useHomeAssistant.getState().activeEntityId;
-      const remoting = !!(castId || haEntId);
+      const castId   = useCast.getState().activeDeviceId;
+      const haEntId  = useHomeAssistant.getState().activeEntityId;
+      const dlnaId   = useDlna.getState().activeDeviceId;
+      const remoting = !!(castId || haEntId || dlnaId);
       const currentPos = remoting ? s.position : engine.element.currentTime;
       if (currentPos > 3) {
         if (remoting) {
           set({ position: 0 });
           lastUserCastSeekAt = Date.now();
-          const remote: any = castId ? (window.mp as any).cast : (window.mp as any).ha;
+          const remote: any =
+            castId  ? (window.mp as any).cast :
+            haEntId ? (window.mp as any).ha   :
+                      (window.mp as any).dlna;
           remote.seek(0).catch((err: any) => {
             console.warn(`[player] prev→remote.seek(0) rejected: ${err?.message ?? err}`);
           });
@@ -620,10 +636,14 @@ export const usePlayer = create<PlayerState>((set, get) => {
       //      correspond to a user-visible intent.
       const castId  = useCast.getState().activeDeviceId;
       const haEntId = useHomeAssistant.getState().activeEntityId;
-      if (castId || haEntId) {
+      const dlnaId  = useDlna.getState().activeDeviceId;
+      if (castId || haEntId || dlnaId) {
         set({ position: sec });
         lastUserCastSeekAt = Date.now();
-        const remote: any = castId ? (window.mp as any).cast : (window.mp as any).ha;
+        const remote: any =
+          castId  ? (window.mp as any).cast :
+          haEntId ? (window.mp as any).ha   :
+                    (window.mp as any).dlna;
         remote.seek(sec).catch((err: any) => {
           console.warn(`[player] remote.seek(${sec}) rejected: ${err?.message ?? err}`);
         });
@@ -662,6 +682,8 @@ export const usePlayer = create<PlayerState>((set, get) => {
         void (window.mp as any).cast.setVolume(v);
       } else if (useHomeAssistant.getState().activeEntityId) {
         void (window.mp as any).ha.setVolume(v);
+      } else if (useDlna.getState().activeDeviceId) {
+        void (window.mp as any).dlna.setVolume(v);
       }
     },
     setLikedIds(ids) { set({ likedIds: new Set(ids) }); },
@@ -803,4 +825,98 @@ useHomeAssistant.subscribe((ha) => {
 
   if (Object.keys(patch).length > 0) usePlayer.setState(patch as any);
 });
+
+// --- DLNA status → player state bridge ---------------------------------------
+// Identical pattern to Cast/HA: mirror position (outside the seek-grace
+// window), duration, and isPlaying. DLNA's TRANSITIONING / NO_MEDIA_PRESENT
+// states map to BUFFERING / IDLE, both of which we deliberately ignore
+// — same transient-blip reasoning as the Cast bridge.
+useDlna.subscribe((dlna) => {
+  const s = dlna.lastStatus;
+  if (!s) return;
+  if (dlna.activeDeviceId !== s.deviceId) return;
+  const patch: Partial<{ position: number; duration: number; isPlaying: boolean }> = {};
+  const withinSeekGrace = Date.now() - lastUserCastSeekAt < CAST_SEEK_GRACE_MS;
+  if (!withinSeekGrace && Number.isFinite(s.currentTime)) patch.position = s.currentTime;
+  if (typeof s.duration === 'number' && s.duration > 0) patch.duration = s.duration;
+  if (s.playerState === 'PLAYING') patch.isPlaying = true;
+  else if (s.playerState === 'PAUSED') patch.isPlaying = false;
+  if (Object.keys(patch).length > 0) usePlayer.setState(patch as any);
+});
+
+// --- DLNA receiver: a remote sender pushed a URL at us -----------------------
+// When VLC / BubbleUPnP / HA's dlna_dmr casts to this app, the main
+// process extracts the media URL and fires `dlna.onIncoming`. We route
+// that through the local audio engine the same way a radio stream would
+// be played. Also mirror transport state back to main so the DLNA
+// receiver can answer GetPositionInfo / GetTransportInfo polls the
+// sender does while we're playing.
+if (typeof window !== 'undefined' && window.mp) {
+  const dlnaBridge: any = (window.mp as any).dlna;
+  if (dlnaBridge?.onIncoming) {
+    dlnaBridge.onIncoming((m: { uri: string; title?: string; artist?: string; album?: string }) => {
+      console.log(`[dlna-receiver] incoming media: ${m.uri} (title="${m.title ?? ''}")`);
+      const engine = getAudioEngine();
+      // Drop any active remote routing — the whole point here is to
+      // play LOCALLY while acting as a DLNA renderer for someone else.
+      useCast.getState().setActive(null);
+      useHomeAssistant.getState().setActive(null);
+      useDlna.getState().setActive(null);
+      engine.element.crossOrigin = 'anonymous';
+      engine.setSrc(m.uri);
+      // Build a fake queue entry so the NowPlayingBar has something to
+      // show. No DB id, so stats/liking are disabled for remote-pushed
+      // tracks.
+      usePlayer.setState({
+        queue: [{
+          id: -1,
+          title: m.title ?? 'DLNA stream',
+          artist: m.artist ?? null,
+          album: m.album ?? null,
+          path: m.uri,
+          durationSec: null,
+          coverArtPath: null,
+        }],
+        originalQueue: [{
+          id: -1,
+          title: m.title ?? 'DLNA stream',
+          artist: m.artist ?? null,
+          album: m.album ?? null,
+          path: m.uri,
+          durationSec: null,
+          coverArtPath: null,
+        }],
+        index: 0,
+        isPlaying: true,
+        position: 0,
+        duration: 0,
+      });
+      engine.play().catch((err: any) => {
+        console.warn(`[dlna-receiver] play failed: ${err?.message ?? err}`);
+      });
+    });
+  }
+
+  // Periodic state push back to main so DLNA senders polling us see
+  // accurate transport + position. Cheap — once per second, same
+  // cadence as our own pollers. Skipped when the app isn't acting as
+  // a receiver (nothing has been pushed yet, element paused + empty).
+  setInterval(() => {
+    try {
+      const engine = getAudioEngine();
+      const el = engine.element;
+      if (!el.src) return;
+      const transport =
+        el.paused && !el.ended ? 'PAUSED_PLAYBACK' :
+        el.ended || !el.currentSrc ? 'STOPPED' :
+        'PLAYING';
+      (window.mp as any).dlna?.setReceiverState?.({
+        transport,
+        positionSec: Number.isFinite(el.currentTime) ? el.currentTime : 0,
+        durationSec: Number.isFinite(el.duration) ? el.duration : 0,
+        currentUri: el.currentSrc || el.src || '',
+      });
+    } catch { /* receiver isn't available; that's fine */ }
+  }, 1000);
+}
 

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { getAudioEngine } from '../audio/AudioEngine';
 import { useCast } from '../store/cast';
 import { useHomeAssistant } from '../store/homeassistant';
+import { useDlna } from '../store/dlna';
 import { usePlayer } from '../store/player';
 
 /**
@@ -127,20 +128,19 @@ export default function OutputDevicePicker() {
     setSelectedId(id);
     setOpen(false);
     await applyDevice(id);
-    // Picking a LOCAL device stops any active remote session — we can
-    // only play through one sink at a time. Fire BOTH stop IPCs
-    // unconditionally rather than branching on the renderer's active
-    // state: main is the source of truth about whether a remote
-    // target is really playing, and its stop functions are no-ops
-    // when nothing's active. Gating on the renderer state produces
-    // the "I can't stop playback" bug where a play-failure had nulled
-    // the renderer's active id while main was still playing on the
-    // previous target.
+    // Picking a LOCAL device stops any active remote session. Fire all
+    // three stop IPCs unconditionally — main is the source of truth
+    // and the stop functions no-op when nothing's active. See the
+    // long-form explanation in the original comment (kept short here
+    // now that the pattern is repeated for three remote kinds).
     try { await (window.mp as any).cast.stop(); } catch { /* noop */ }
     try { await (window.mp as any).ha.stop(); }   catch { /* noop */ }
+    try { await (window.mp as any).dlna.stop(); } catch { /* noop */ }
     useCast.getState().setActive(null);
     useHomeAssistant.getState().setActive(null);
     useHomeAssistant.getState().setError(null);
+    useDlna.getState().setActive(null);
+    useDlna.getState().setError(null);
     // Persist so the choice survives restart. `as any` to bypass the
     // settings type check — outputDevice is nullable in the schema.
     void window.mp.settings.set({ playback: { outputDevice: id } } as any);
@@ -160,12 +160,15 @@ export default function OutputDevicePicker() {
     console.log(`[cast-picker] picked deviceId=${deviceId} | hasCurrent=${!!current} | queueLen=${player.queue.length} | index=${player.index}`);
 
     // Fire stops unconditionally — see the note in `pick()`. One remote
-    // sink at a time, so any previously-active target (whether Cast or
-    // HA, whether the renderer knows about it or not) gets hushed.
+    // sink at a time, so any previously-active target (Cast / HA / DLNA,
+    // whether the renderer knows about it or not) gets hushed.
     try { await (window.mp as any).ha.stop(); }   catch { /* noop */ }
     try { await (window.mp as any).cast.stop(); } catch { /* noop */ }
+    try { await (window.mp as any).dlna.stop(); } catch { /* noop */ }
     useHomeAssistant.getState().setActive(null);
     useHomeAssistant.getState().setError(null);
+    useDlna.getState().setActive(null);
+    useDlna.getState().setError(null);
     useCast.getState().setActive(deviceId);
 
     // Pause the local engine so the laptop speakers don't double-play.
@@ -218,7 +221,10 @@ export default function OutputDevicePicker() {
     // speaker goes silent before the new one starts).
     try { await (window.mp as any).cast.stop(); } catch { /* noop */ }
     try { await (window.mp as any).ha.stop(); }   catch { /* noop */ }
+    try { await (window.mp as any).dlna.stop(); } catch { /* noop */ }
     useCast.getState().setActive(null);
+    useDlna.getState().setActive(null);
+    useDlna.getState().setError(null);
     useHomeAssistant.getState().setError(null);
     // Optimistically mark the new target active. If play_media fails
     // below we'll null it out — by then the old target has already been
@@ -254,6 +260,57 @@ export default function OutputDevicePicker() {
     }
   }
 
+  /**
+   * Selecting a DLNA MediaRenderer. Same shape as pickCast/pickHa:
+   * stop everything else first, optimistically activate, push the
+   * current track through the SOAP AVTransport service.
+   *
+   * Unlike Cast (cast-v2 handshake) or HA (REST over TLS), DLNA is
+   * plain HTTP SOAP — most failures are 500s from a picky renderer
+   * that doesn't like our DIDL-Lite metadata, or a timeout from a
+   * device that went to sleep. Both surface as banner errors the
+   * same way HA failures do.
+   */
+  async function pickDlna(deviceId: string) {
+    setOpen(false);
+    const player = usePlayer.getState();
+    const current = player.queue[player.index];
+    console.log(`[dlna-picker] picked deviceId=${deviceId} | hasCurrent=${!!current} | queueLen=${player.queue.length} | index=${player.index}`);
+
+    try { await (window.mp as any).cast.stop(); } catch { /* noop */ }
+    try { await (window.mp as any).ha.stop(); }   catch { /* noop */ }
+    try { await (window.mp as any).dlna.stop(); } catch { /* noop */ }
+    useCast.getState().setActive(null);
+    useHomeAssistant.getState().setActive(null);
+    useHomeAssistant.getState().setError(null);
+    useDlna.getState().setError(null);
+    useDlna.getState().setActive(deviceId);
+
+    try { getAudioEngine().pause(); } catch { /* noop */ }
+
+    if (!current) {
+      console.log('[dlna-picker] no current track — DLNA active, waiting for user to start a track');
+      return;
+    }
+
+    try {
+      console.log(`[dlna-picker] starting DLNA cast of "${current.title}" to ${deviceId}`);
+      await (window.mp as any).dlna.play(deviceId, current.path, {
+        title: current.title,
+        artist: current.artist ?? undefined,
+        album: current.album ?? undefined,
+      });
+      usePlayer.setState({ isPlaying: true });
+      console.log(`[dlna-picker] dlna.play resolved`);
+    } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      console.error(`[dlna-picker] couldn't start DLNA playback: ${msg}`);
+      useDlna.getState().setActive(null);
+      const short = msg.length > 140 ? `${msg.slice(0, 140)}…` : msg;
+      useDlna.getState().setError(`${deviceId} rejected playback: ${short}`);
+    }
+  }
+
   // Subscribe to Cast state so the UI reflects which device (if any)
   // is currently receiving playback AND the current discovery status
   // (used to tint the speaker icon: green=devices found, orange=still
@@ -272,6 +329,15 @@ export default function OutputDevicePicker() {
   const haError        = useHomeAssistant((s) => s.lastError);
   const refreshHa      = useHomeAssistant((s) => s.refreshEntities);
 
+  // DLNA: devices arrive via SSDP responses to the main-process
+  // discovery loop; the renderer subscribes to push ticks in
+  // src/store/dlna.ts so we don't need our own interval here.
+  const dlnaDevices    = useDlna((s) => s.devices);
+  const dlnaActive     = useDlna((s) => s.activeDeviceId);
+  const dlnaStatus     = useDlna((s) => s.status);
+  const dlnaError      = useDlna((s) => s.lastError);
+  const dlnaScan       = useDlna((s) => s.scanProgress);
+
   // Refresh the HA entity list when the dropdown opens, and every 15s
   // while it remains open — that's enough to pick up an HA restart or
   // a newly-added speaker without being chatty when the picker isn't
@@ -283,13 +349,27 @@ export default function OutputDevicePicker() {
     return () => clearInterval(t);
   }, [open, refreshHa]);
 
+  // Trigger a fresh DLNA scan each time the picker opens, so the "scanning
+  // LAN" indicator actually shows up when the user is looking. The
+  // startup scan has almost always finished by the time a human clicks
+  // anything; without this the indicator is only visible during the
+  // first 6 seconds after app launch. Main's startDlnaDiscovery() is
+  // idempotent — it re-M-SEARCHes and restarts the progress-tick loop
+  // without rebuilding the SSDP client.
+  useEffect(() => {
+    if (!open) return;
+    try { void (window.mp as any).dlna?.rescan?.(); } catch { /* noop */ }
+  }, [open]);
+
   // Build a friendly label for the currently-selected device. A remote
-  // sink (Cast or HA) trumps the local selection in the button title.
+  // sink (Cast / HA / DLNA) trumps the local selection in the button title.
   const activeCastDevice = castActive ? castDevices.find((c) => c.id === castActive) : null;
-  const activeHaEntity   = haActive   ? haEntities.find((e) => e.id === haActive) : null;
+  const activeHaEntity   = haActive   ? haEntities.find((e) => e.id === haActive)   : null;
+  const activeDlnaDevice = dlnaActive ? dlnaDevices.find((d) => d.id === dlnaActive) : null;
   const currentLabel =
     activeCastDevice ? `Cast → ${activeCastDevice.name}` :
     activeHaEntity   ? `HA → ${activeHaEntity.name}` :
+    activeDlnaDevice ? `DLNA → ${activeDlnaDevice.name}` :
     selectedId === DEFAULT_ID ? 'System default' :
     devices.find((d) => d.deviceId === selectedId)?.label || 'Unknown device';
 
@@ -297,7 +377,7 @@ export default function OutputDevicePicker() {
     <div ref={rootRef} className="relative">
       <button
         onClick={() => setOpen((v) => !v)}
-        title={buildIconTitle(currentLabel, castStatus, castDevices.length, !!castActive, haStatus, haEntities.length, !!haActive)}
+        title={buildIconTitle(currentLabel, castStatus, castDevices.length, !!castActive, haStatus, haEntities.length, !!haActive, dlnaStatus, dlnaDevices.length, !!dlnaActive)}
         aria-label={`Output device (currently ${currentLabel})`}
         className={`p-1 transition ${open ? 'text-white' : 'text-text-secondary hover:text-white'}`}
       >
@@ -318,13 +398,13 @@ export default function OutputDevicePicker() {
           </svg>
           <span
             className={`absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full ring-1 ring-bg-elev-1 ${
-              (castActive || haActive)
+              (castActive || haActive || dlnaActive)
                 ? 'bg-accent'
-                : (castStatus === 'found' || haStatus === 'ready')
+                : (castStatus === 'found' || haStatus === 'ready' || dlnaStatus === 'ready')
                   ? 'bg-emerald-400'
-                  : (castStatus === 'error' || haStatus === 'error')
+                  : (castStatus === 'error' || haStatus === 'error' || dlnaStatus === 'error')
                     ? 'bg-red-500'
-                    : (castStatus === 'searching' || haStatus === 'connecting')
+                    : (castStatus === 'searching' || haStatus === 'connecting' || dlnaStatus === 'scanning')
                       ? 'bg-amber-400 animate-pulse'
                       : 'bg-transparent ring-0'
             }`}
@@ -363,7 +443,7 @@ export default function OutputDevicePicker() {
           <DeviceRow
             label="System default"
             sublabel="Follow the OS audio setting"
-            active={selectedId === DEFAULT_ID && !castActive && !haActive}
+            active={selectedId === DEFAULT_ID && !castActive && !haActive && !dlnaActive}
             onPick={() => pick(DEFAULT_ID)}
           />
 
@@ -376,7 +456,7 @@ export default function OutputDevicePicker() {
               <DeviceRow
                 key={d.deviceId}
                 label={d.label || 'Unnamed output'}
-                active={selectedId === d.deviceId && !castActive && !haActive}
+                active={selectedId === d.deviceId && !castActive && !haActive && !dlnaActive}
                 onPick={() => pick(d.deviceId)}
               />
             ))}
@@ -449,6 +529,74 @@ export default function OutputDevicePicker() {
               Home Assistant unreachable — check Settings → Home Assistant.
             </div>
           )}
+
+          {/* DLNA / UPnP section — always rendered for visual parity with
+              Cast and Home Assistant. The header is static (so the user
+              can always see where DLNA lives in the picker), with a
+              spinner + progress bar overlaying it during the 6-second
+              scan window. Rows populate as renderers respond. When the
+              scan is done and nothing turned up, a one-line "No
+              renderers found" message replaces the empty list. */}
+          <div className="mt-1 px-3 py-1.5 text-[10px] uppercase tracking-wider text-text-muted border-t border-white/5 flex items-center gap-2">
+            <span className="flex-1">DLNA / UPnP</span>
+            {dlnaScan && !dlnaScan.done && (
+              <span className="normal-case text-text-muted text-[9px] flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-full border border-accent border-t-transparent animate-spin" />
+                scanning
+              </span>
+            )}
+          </div>
+
+          {/* Slender progress bar under the header while scanning. CSS
+              width transitions between ticks so it animates smoothly
+              without a JS rAF loop. */}
+          {dlnaScan && !dlnaScan.done && (
+            <div className="mx-3 mb-1 h-0.5 bg-white/5 rounded overflow-hidden">
+              <div
+                className="h-full bg-accent transition-[width] duration-200 ease-out"
+                style={{ width: `${Math.min(100, (dlnaScan.elapsedMs / dlnaScan.totalMs) * 100)}%` }}
+              />
+            </div>
+          )}
+
+          {dlnaDevices.map((d) => (
+            <DeviceRow
+              key={d.id}
+              label={`📻 ${d.name}`}
+              sublabel={d.modelName ? `${d.modelName} · ${d.host}` : d.host}
+              active={dlnaActive === d.id}
+              onPick={() => pickDlna(d.id)}
+            />
+          ))}
+
+          {/* Empty states split by scan phase:
+                scanning + 0 devices   → "searching…" (we're still looking)
+                done + 0 devices        → "none found on your LAN" (final)
+              Goes away the moment anything arrives. */}
+          {dlnaDevices.length === 0 && dlnaScan && !dlnaScan.done && (
+            <div className="px-3 py-2 text-[10px] text-text-muted">
+              Searching your LAN for DLNA renderers…
+            </div>
+          )}
+          {dlnaDevices.length === 0 && (!dlnaScan || dlnaScan.done) && (
+            <div className="px-3 py-2 text-[10px] text-text-muted">
+              No DLNA renderers on your LAN.
+            </div>
+          )}
+
+          {/* DLNA error banner (play failed, renderer returned 500). */}
+          {dlnaError && (
+            <div className="mx-2 my-1 p-2 rounded bg-red-500/10 border border-red-500/30 text-[11px] text-red-200">
+              <div className="flex items-start gap-2">
+                <span className="flex-1 break-words">{dlnaError}</span>
+                <button
+                  onClick={() => useDlna.getState().setError(null)}
+                  className="text-red-200/60 hover:text-red-100 flex-shrink-0"
+                  title="Dismiss"
+                >✕</button>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -469,10 +617,13 @@ function buildIconTitle(
   haStatus: import('../store/homeassistant').HaStatus,
   haCount: number,
   haActive: boolean,
+  dlnaStatus: import('../store/dlna').DlnaStatus,
+  dlnaCount: number,
+  dlnaActive: boolean,
 ): string {
   const head = `Output: ${current}`;
   // Active remote sink — the header line tells the whole story.
-  if (casting || haActive) return head;
+  if (casting || haActive || dlnaActive) return head;
   const lines: string[] = [head];
   if (castStatus === 'found') lines.push(`${castCount} Cast device${castCount === 1 ? '' : 's'} available`);
   else if (castStatus === 'searching') lines.push('Searching for Cast devices on your network…');
@@ -480,6 +631,9 @@ function buildIconTitle(
   if (haStatus === 'ready') lines.push(`${haCount} Home Assistant speaker${haCount === 1 ? '' : 's'} available`);
   else if (haStatus === 'connecting') lines.push('Connecting to Home Assistant…');
   else if (haStatus === 'error') lines.push('Home Assistant unreachable');
+  if (dlnaStatus === 'ready') lines.push(`${dlnaCount} DLNA renderer${dlnaCount === 1 ? '' : 's'} available`);
+  else if (dlnaStatus === 'scanning') lines.push('Scanning LAN for DLNA renderers…');
+  else if (dlnaStatus === 'error') lines.push('DLNA discovery failed');
   return lines.join('\n');
 }
 

@@ -132,6 +132,40 @@ const api = {
       return () => ipcRenderer.removeListener(IPC.CAST_STATUS, listener);
     },
   },
+  // DLNA / UPnP sinks (sender + receiver). Same shape as cast/ha with
+  // two extra push channels: scan progress (for the boot-time
+  // discovery indicator) and incoming media (remote DLNA sender
+  // pushing a URL at our receiver).
+  dlna: {
+    list: () => ipcRenderer.invoke(IPC.DLNA_LIST),
+    rescan: () => ipcRenderer.invoke(IPC.DLNA_RESCAN),
+    play: (deviceId: string, filePath: string, meta?: unknown) => ipcRenderer.invoke(IPC.DLNA_PLAY, deviceId, filePath, meta),
+    pause: () => ipcRenderer.invoke(IPC.DLNA_PAUSE),
+    resume: () => ipcRenderer.invoke(IPC.DLNA_RESUME),
+    stop: () => ipcRenderer.invoke(IPC.DLNA_STOP),
+    setVolume: (level: number) => ipcRenderer.invoke(IPC.DLNA_SET_VOLUME, level),
+    seek: (seconds: number) => ipcRenderer.invoke(IPC.DLNA_SEEK, seconds),
+    active: () => ipcRenderer.invoke(IPC.DLNA_ACTIVE),
+    onStatus: (cb: (p: { deviceId: string; currentTime: number; duration: number | null; playerState: string }) => void) => {
+      const listener = (_: unknown, p: any) => cb(p);
+      ipcRenderer.on(IPC.DLNA_STATUS, listener);
+      return () => ipcRenderer.removeListener(IPC.DLNA_STATUS, listener);
+    },
+    onScanProgress: (cb: (p: { elapsedMs: number; totalMs: number; found: number; done: boolean }) => void) => {
+      const listener = (_: unknown, p: any) => cb(p);
+      ipcRenderer.on(IPC.DLNA_SCAN, listener);
+      return () => ipcRenderer.removeListener(IPC.DLNA_SCAN, listener);
+    },
+    onIncoming: (cb: (m: { uri: string; title?: string; artist?: string; album?: string }) => void) => {
+      const listener = (_: unknown, m: any) => cb(m);
+      ipcRenderer.on(IPC.DLNA_INCOMING, listener);
+      return () => ipcRenderer.removeListener(IPC.DLNA_INCOMING, listener);
+    },
+    // Renderer tells main what transport state to report to external
+    // DLNA senders polling our receiver.
+    setReceiverState: (state: { transport?: 'PLAYING' | 'PAUSED_PLAYBACK' | 'STOPPED' | 'TRANSITIONING'; positionSec?: number; durationSec?: number; currentUri?: string }) =>
+      ipcRenderer.invoke(IPC.DLNA_RECEIVER_STATE, state),
+  },
   // Home Assistant sinks. Same surface as cast above, with one extra
   // handler (`test`) for the settings panel's "Test connection" button.
   // Never exposes the HA token to the renderer — the renderer passes
