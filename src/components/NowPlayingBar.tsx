@@ -2,6 +2,7 @@ import { useNavigate } from 'react-router-dom';
 import { usePlayer } from '../store/player';
 import { mediaUrl } from '../lib/mediaUrl';
 import { parseRadioTitle } from '../lib/parseRadioTitle';
+import OutputDevicePicker from './OutputDevicePicker';
 
 function fmt(sec: number) {
   if (!Number.isFinite(sec)) return '0:00';
@@ -181,6 +182,10 @@ export default function NowPlayingBar() {
       </div>
 
       <div className="flex items-center justify-end gap-2 text-text-secondary">
+        {/* Output-device picker — sits just before the volume slider so
+            they're grouped as "audio routing" controls. Click the speaker
+            icon to pick between System default / any local audio output. */}
+        <OutputDevicePicker />
         <span className="text-xs">Vol</span>
         <input
           type="range" min={0} max={1} step={0.01} value={volume}

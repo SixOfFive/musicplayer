@@ -351,6 +351,28 @@ function registerMediaProtocol() {
  * Skips mp-media:// (local file protocol) which already has its own CORS
  * handling, and anything on localhost/127.0.0.1 (dev server / local mirrors).
  */
+/**
+ * Auto-grant the one permission the app legitimately needs: `media` /
+ * `microphone`. We never record; the permission unlocks
+ * `navigator.mediaDevices.enumerateDevices()` returning device *labels*
+ * instead of generic "Audio output 1 / 2 / 3". Without labels the output-
+ * device picker in the player bar can't show names the user recognises
+ * (Speakers, Headphones, USB DAC, HDMI Display, etc.). Prompting the
+ * user for microphone access in a music player feels wrong, so we
+ * silently allow it up-front.
+ *
+ * Every other permission is explicitly denied.
+ */
+function autoGrantLocalMediaPermission() {
+  const allowList = new Set(['media', 'audioCapture']);
+  session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
+    callback(allowList.has(permission));
+  });
+  session.defaultSession.setPermissionCheckHandler((_wc, permission) => {
+    return allowList.has(permission);
+  });
+}
+
 function enableUniversalCors() {
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
     try {
@@ -407,6 +429,7 @@ app.whenReady().then(async () => {
     catch { /* ignore */ }
   }
 
+  autoGrantLocalMediaPermission();
   enableUniversalCors();
   registerMediaProtocol();
 
