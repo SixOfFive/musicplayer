@@ -714,10 +714,18 @@ export async function rescanAlbum(albumId: number): Promise<RescanAlbumResult> {
       }
     }
 
-    // If nothing's left in this album, drop the album row so it stops
-    // showing up in library views.
+    // Only drop the album row if the folder is TRULY empty — no audio
+    // files present on disk at all. If we did find audio files in the
+    // folder but they got routed to a different album_id via their
+    // metadata tags (e.g. ffmpeg rewrote the album tag slightly during a
+    // FLAC→MP3 conversion), the original album row ends up with zero
+    // tracks but the content is still "there", just under a new id.
+    // Deleting the row in that case rips the user's current page out
+    // from under them — keep it around so they can navigate and
+    // investigate. A folder with ZERO audio files is a different story:
+    // the album really is gone (deleted on disk, or never had tracks).
     const remaining = db.prepare('SELECT COUNT(*) AS c FROM tracks WHERE album_id = ?').get(albumId) as { c: number };
-    if (remaining.c === 0) {
+    if (remaining.c === 0 && foundPaths.length === 0) {
       db.prepare('DELETE FROM albums WHERE id = ?').run(albumId);
       summary.albumDeleted = true;
     }

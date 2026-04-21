@@ -268,6 +268,7 @@ export const IPC = {
   LIBRARY_SEARCH: 'library:search',
   LIBRARY_LARGEST_ALBUMS: 'library:largest-albums',
   LIBRARY_MIGRATE_COVER_ART: 'library:migrate-cover-art',
+  LIBRARY_REVEAL_IN_FOLDER: 'library:reveal-in-folder',
   // Playback helpers
   PLAYBACK_FILE_URL: 'playback:file-url',
   // Visualizer plugins

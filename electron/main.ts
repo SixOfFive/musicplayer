@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { createReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import { Readable } from 'node:stream';
+import { statWithFallback } from './services/fs-fallback';
 import { registerSettingsIpc } from './ipc/settings';
 import { registerLibraryIpc } from './ipc/library';
 import { registerScanIpc, setProgressWindow, resumeArtFetchOnStartup } from './ipc/scan';
@@ -88,80 +89,6 @@ function createWindow() {
     const tag = ['DEBUG', 'INFO', 'WARN', 'ERROR'][level] ?? 'LOG';
     process.stdout.write(`[renderer ${tag}] ${msg}  (${src}:${line})\n`);
   });
-}
-
-/**
- * Stat a file path, falling back to a parent-directory listing if the OS
- * returns ENOENT. This works around a real bug we saw reproducing across
- * both Windows and Linux SMB clients:
- *
- * User's library contains a Kesha track literally titled "Yippee-Ki-Yay."
- * (trailing period), producing the filename "Yippee-Ki-Yay..flac" — two
- * dots in a row before the extension. On a freshly-mounted SMB share,
- * `fs.stat` against that path succeeds normally. After the share is
- * heavily exercised (cover art scrolls, other tracks played), Windows'
- * SMB client name-resolution cache + Win32 path-canonicalization
- * intermittently desync: `fs.stat` returns ENOENT for the exact same
- * path that worked minutes earlier, and the underlying file still
- * exists. The same disconnect happens on the Linux SMB/CIFS side for
- * the same file.
- *
- * The renderer sees a DEMUXER_ERROR_COULD_NOT_OPEN, the audio element
- * freezes mid-play, and the user thinks the app is broken even though
- * the file is literally there on disk. Auto-skipping was added in the
- * player store for the "file genuinely missing" case, but that's
- * heavy-handed when the file IS present — we should play it.
- *
- * Fallback tiers, tried in order:
- *   1. Exact match (shouldn't reach here — stat missed — but harmless)
- *   2. Case-insensitive match (SMB shares sometimes report case
- *      differently than how the DB stored it during scan)
- *   3. Dot-normalized match on the basename stem — strips trailing
- *      dots from the part before the final extension. Catches the
- *      Yippee-Ki-Yay..flac ↔ Yippee-Ki-Yay.flac class of mismatches
- *      in either direction.
- *
- * `readdir` is less aggressively cached than `stat` on most SMB clients,
- * so it tends to see the real, uncanonicalized filename even when stat
- * is "lying".
- *
- * Returns the resolved absolute path + its stat; throws the original
- * ENOENT if no fallback matched.
- */
-async function statWithFallback(requested: string): Promise<{ path: string; stat: import('node:fs').Stats }> {
-  try {
-    const st = await fs.stat(requested);
-    return { path: requested, stat: st };
-  } catch (err: any) {
-    if (err?.code !== 'ENOENT') throw err;
-
-    const dir = path.dirname(requested);
-    const targetName = path.basename(requested);
-    let entries: string[];
-    try { entries = await fs.readdir(dir); }
-    catch { throw err; /* folder itself unreachable — surface the original ENOENT */ }
-
-    // Tier 1: exact
-    let hit = entries.find((e) => e === targetName);
-    // Tier 2: case-insensitive
-    if (!hit) hit = entries.find((e) => e.toLowerCase() === targetName.toLowerCase());
-    // Tier 3: dot-normalized (strip trailing dots from the stem before ext)
-    if (!hit) {
-      const normalize = (name: string) => {
-        const ext = path.extname(name);
-        const stem = ext ? name.slice(0, -ext.length) : name;
-        return (stem.replace(/\.+$/, '') + ext).toLowerCase();
-      };
-      const normalizedTarget = normalize(targetName);
-      hit = entries.find((e) => normalize(e) === normalizedTarget);
-    }
-    if (!hit) throw err;
-
-    const resolved = path.join(dir, hit);
-    const st = await fs.stat(resolved);
-    process.stdout.write(`[mp-media] fallback resolved "${targetName}" → "${hit}" in ${dir}\n`);
-    return { path: resolved, stat: st };
-  }
 }
 
 // Content-type lookup for the file extensions we serve. Browsers match on

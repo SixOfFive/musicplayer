@@ -80,7 +80,15 @@ export default function TopBar() {
         <input
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter' && q.trim()) nav(`/library?q=${encodeURIComponent(q)}`); }}
+          onKeyDown={(e) => {
+            // Route to the dedicated /search view (albums + artists + tracks
+            // in one place) instead of /library (tracks only). Matches user
+            // expectation that searching the top bar surfaces the full
+            // library — they can then click an album to go to the album view
+            // rather than having to play a track and navigate from the
+            // NowPlayingBar.
+            if (e.key === 'Enter' && q.trim()) nav(`/search?q=${encodeURIComponent(q)}`);
+          }}
           placeholder="Search your library"
           className="w-full bg-bg-elev-2 text-sm px-4 py-2 rounded-full outline-none focus:ring-1 focus:ring-white/30 text-text-primary"
         />

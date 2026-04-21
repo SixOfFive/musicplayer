@@ -6,12 +6,23 @@ import { IPC, type ConvertProgress } from '../../shared/types';
 import { getDb } from '../services/db';
 import { getSettings } from '../services/settings-store';
 import { convertToMp3, isFfmpegAvailable, mp3PathFor } from '../services/ffmpeg';
+import { resolveExistingPath } from '../services/fs-fallback';
 
 let abortController: AbortController | null = null;
 let inProgress = false;
 
 export function registerConvertIpc(ipcMain: IpcMain, getWin: () => BrowserWindow | null) {
-  const emit = (p: ConvertProgress) => getWin()?.webContents.send(IPC.CONVERT_PROGRESS, p);
+  const emit = (p: ConvertProgress) => {
+    // Mirror every progress event to stdout so debugging a failed convert
+    // doesn't require fishing it out of the renderer console. Phase + any
+    // message + the currently-targeted file is usually enough to tell what
+    // step broke; on 'error' phase we dump the full message inline.
+    const bits = [`phase=${p.phase}`, `done=${p.tracksDone}/${p.tracksTotal}`];
+    if (p.currentFile) bits.push(`file=${p.currentFile}`);
+    if (p.message) bits.push(`msg=${p.message}`);
+    process.stdout.write(`[convert] ${bits.join(' | ')}\n`);
+    getWin()?.webContents.send(IPC.CONVERT_PROGRESS, p);
+  };
 
   ipcMain.handle(IPC.CONVERT_CHECK_AVAILABLE, async () => {
     const available = await isFfmpegAvailable();
@@ -68,25 +79,45 @@ export function registerConvertIpc(ipcMain: IpcMain, getWin: () => BrowserWindow
         message: `Converting "${albumRow?.title ?? 'album'}" (${rows.length} FLAC track${rows.length === 1 ? '' : 's'})`,
       });
 
-      // Convert each track.
-      const results: Array<{ trackId: number; flac: string; mp3: string; mp3Size: number }> = [];
+      // Per-track "commit as you go" flow. Each FLAC is independently:
+      //   convert → verify (exists + ≥30 KB) → delete FLAC → update DB
+      // A failure at ANY step leaves the FLAC untouched and (if created)
+      // unlinks the bad MP3. Prior successful tracks stay committed.
+      //
+      // This is the user's safety guarantee: if verification fails (zero-
+      // byte output, small output, missing output), the original FLAC is
+      // NEVER removed, and the garbage MP3 is cleaned up so a retry starts
+      // fresh. Previously we batched verify+trash at the end, which had
+      // two failure modes users hit:
+      //   1. shell.trashItem on SMB shares silently hard-deletes, so a
+      //      successful trash-then-DB-crash loses originals outright.
+      //   2. An orphaned half-converted MP3 from a crashed run blocked
+      //      the next run's pre-flight with "refusing to overwrite".
+      //
+      // The per-track version sidesteps both: FLACs only leave after
+      // their MP3 verifies, and we don't care what garbage a previous
+      // crashed run left behind — ffmpeg's `-y` flag overwrites it.
+      const MIN_MP3_BYTES = 30 * 1024; // ~1 sec at 256 kbps; smaller = corrupt
+      const MP3_CODEC = 'MPEG 1 Layer 3';
+
+      const update = db.prepare('UPDATE tracks SET path = ?, size = ?, codec = ? WHERE id = ?');
+
+      let tracksConverted = 0;
+      let tracksSkipped = 0;
+      let bytesAfter = 0;
+      const skipReasons: string[] = [];
+
       for (let i = 0; i < rows.length; i++) {
         if (abortController.signal.aborted) break;
         const r = rows[i];
-        const outPath = mp3PathFor(r.path);
 
-        // Pre-flight: refuse to overwrite an existing mp3 at the target.
-        try {
-          const st = await fs.stat(outPath);
-          if (st.isFile()) {
-            emit({
-              ...emitBase, phase: 'error', tracksTotal: rows.length, tracksDone: i,
-              message: `Refusing to overwrite existing ${path.basename(outPath)}`,
-              currentFile: r.path, bytesBefore,
-            });
-            return { ok: false, error: `Target exists: ${outPath}` };
-          }
-        } catch { /* no existing file — proceed */ }
+        // Resolve the FLAC path via fs-fallback so trailing-dot / case-drift
+        // filenames on SMB shares still open. ffmpeg itself doesn't do this
+        // resolution, so without it ffmpeg would fail on the same files the
+        // playback path used to fail on.
+        const resolvedFlac = await resolveExistingPath(r.path);
+        const outPath = mp3PathFor(resolvedFlac);
+        const baseName = path.basename(resolvedFlac);
 
         emit({
           ...emitBase,
@@ -98,103 +129,111 @@ export function registerConvertIpc(ipcMain: IpcMain, getWin: () => BrowserWindow
           message: null,
         });
 
-        const res = await convertToMp3(r.path, outPath, settings.conversion.quality, abortController.signal);
+        // --- 1. Convert -----------------------------------------------------
+        const res = await convertToMp3(resolvedFlac, outPath, settings.conversion.quality, abortController.signal);
         if (!res.ok) {
-          emit({
-            ...emitBase, phase: 'error', tracksTotal: rows.length, tracksDone: i,
-            currentFile: r.path, bytesBefore,
-            message: res.error ?? 'Conversion failed',
-          });
-          return { ok: false, error: res.error ?? 'Conversion failed' };
+          // ffmpeg itself failed. If it left a partial file behind, clean it
+          // up — no point keeping a half-written mp3 around. Leave the FLAC
+          // alone. Continue to the next track.
+          try { await fs.unlink(outPath); } catch { /* might not exist */ }
+          process.stdout.write(`[convert] ffmpeg failed on ${baseName}: ${res.error} — FLAC preserved, skipping\n`);
+          tracksSkipped++;
+          skipReasons.push(`${baseName}: ffmpeg failed (${(res.error ?? '').slice(0, 120)})`);
+          continue;
         }
 
-        // Verify the MP3 exists and is non-trivially sized (>= 30 KB — a 1-second
-        // MP3 at 256 kbps is ~32 KB; anything smaller is almost certainly corrupt).
+        // --- 2. Verify output ----------------------------------------------
         let mp3Size = 0;
         try {
           const st = await fs.stat(outPath);
           mp3Size = st.size;
         } catch {
-          emit({
-            ...emitBase, phase: 'error', tracksTotal: rows.length, tracksDone: i,
-            currentFile: r.path, bytesBefore,
-            message: `Output missing after conversion: ${outPath}`,
-          });
-          return { ok: false, error: 'Output missing' };
+          process.stdout.write(`[convert] output missing after ffmpeg on ${baseName} — FLAC preserved, skipping\n`);
+          tracksSkipped++;
+          skipReasons.push(`${baseName}: output file missing`);
+          continue;
         }
-        if (mp3Size < 30 * 1024) {
-          emit({
-            ...emitBase, phase: 'error', tracksTotal: rows.length, tracksDone: i,
-            currentFile: r.path, bytesBefore,
-            message: `Output suspiciously small (${mp3Size} bytes): ${outPath}`,
-          });
-          try { await fs.unlink(outPath); } catch { /* ignore */ }
-          return { ok: false, error: 'Output too small' };
+        if (mp3Size < MIN_MP3_BYTES) {
+          // Output is zero-byte or suspiciously small. Delete it (it's
+          // garbage, not something the user placed). Keep the FLAC.
+          try { await fs.unlink(outPath); } catch { /* best effort */ }
+          process.stdout.write(`[convert] output too small (${mp3Size} bytes) on ${baseName} — removed bad mp3, FLAC preserved, skipping\n`);
+          tracksSkipped++;
+          skipReasons.push(`${baseName}: output was ${mp3Size} bytes (expected ≥${MIN_MP3_BYTES})`);
+          continue;
         }
 
-        results.push({ trackId: r.id, flac: r.path, mp3: outPath, mp3Size });
+        // --- 3. Remove the FLAC --------------------------------------------
+        // Honors the moveOriginalsToTrash setting. trashItem goes to OS
+        // Recycle Bin on local volumes; on SMB it may hard-delete (the
+        // user is aware and accepts this — per-track verification above
+        // ensures we never remove a FLAC without a good MP3 in place).
+        try {
+          if (settings.conversion.moveOriginalsToTrash) await shell.trashItem(resolvedFlac);
+          else await fs.unlink(resolvedFlac);
+        } catch (err: any) {
+          // Couldn't remove the FLAC. The MP3 is valid but we now have
+          // both formats. Don't update the DB (keep it pointing at the
+          // FLAC, which still works). Continue — user ends up with an
+          // extra mp3 in the folder but no data loss.
+          process.stdout.write(`[convert] couldn't remove ${baseName} after convert: ${err?.message ?? err} — DB left on FLAC, skipping\n`);
+          tracksSkipped++;
+          skipReasons.push(`${baseName}: couldn't remove original (${err?.message ?? err})`);
+          continue;
+        }
+
+        // --- 4. Commit the DB update ---------------------------------------
+        update.run(outPath, mp3Size, MP3_CODEC, r.id);
+        tracksConverted++;
+        bytesAfter += mp3Size;
+
+        process.stdout.write(`[convert] ok ${baseName} → ${path.basename(outPath)} (${prettyBytes(mp3Size)})\n`);
       }
 
       if (abortController.signal.aborted) {
-        // Nothing has been deleted yet — just report cancel.
         emit({
-          ...emitBase, phase: 'error', tracksTotal: rows.length, tracksDone: results.length,
-          bytesBefore, message: 'Conversion cancelled. Any .mp3 files created so far are left in place.',
+          ...emitBase, phase: 'error', tracksTotal: rows.length, tracksDone: tracksConverted,
+          bytesBefore, bytesAfter,
+          message: `Cancelled. ${tracksConverted} track${tracksConverted === 1 ? '' : 's'} committed, the rest left untouched.`,
         });
-        return { ok: false, error: 'cancelled' };
+        return { ok: false, error: 'cancelled', tracksConverted, tracksSkipped };
       }
 
-      // Verification pass: all MP3s must exist, total reasonable size vs FLAC.
-      emit({ ...emitBase, phase: 'verifying', tracksTotal: rows.length, tracksDone: rows.length, bytesBefore, message: 'Verifying outputs' });
-      let bytesAfter = 0;
-      for (const r of results) {
-        const st = await fs.stat(r.mp3);
-        bytesAfter += st.size;
-      }
-
-      // Move FLAC originals to trash, then update DB rows in a single transaction.
-      emit({
-        ...emitBase, phase: 'removing-originals', tracksTotal: rows.length, tracksDone: rows.length,
-        bytesBefore, bytesAfter, message: settings.conversion.moveOriginalsToTrash ? 'Moving FLAC originals to trash' : 'Deleting FLAC originals',
-      });
-
-      for (const r of results) {
-        try {
-          if (settings.conversion.moveOriginalsToTrash) await shell.trashItem(r.flac);
-          else await fs.unlink(r.flac);
-        } catch (err: any) {
-          // If we can't remove the FLAC, don't remap the DB — the user ends up
-          // with both files, which is safe. Surface the error but keep going.
-          emit({
-            ...emitBase, phase: 'error', tracksTotal: rows.length, tracksDone: rows.length,
-            bytesBefore, bytesAfter,
-            message: `Couldn't remove ${r.flac}: ${err?.message ?? err}`,
-          });
-          return { ok: false, error: err?.message ?? 'Remove failed' };
-        }
-      }
-
-      // Update DB: point rows at the new MP3 and update size/codec/path.
-      const update = db.prepare('UPDATE tracks SET path = ?, size = ?, codec = ? WHERE id = ?');
-      const tx = db.transaction(() => {
-        for (const r of results) update.run(r.mp3, r.mp3Size, 'MPEG 1 Layer 3', r.trackId);
-      });
-      tx();
+      // Final summary. "ok" is true as long as we DID convert at least one
+      // track cleanly. A run with some skips but some successes is still a
+      // win — we just tell the user what skipped so they can investigate.
+      const allSucceeded = tracksSkipped === 0 && tracksConverted === rows.length;
+      const msgParts: string[] = [];
+      if (tracksConverted > 0) msgParts.push(`Saved ${prettyBytes(Math.max(0, bytesBefore - bytesAfter))} across ${tracksConverted} track${tracksConverted === 1 ? '' : 's'}`);
+      if (tracksSkipped > 0) msgParts.push(`${tracksSkipped} skipped (check log)`);
+      const summaryMsg = msgParts.join(' · ') || 'Nothing to do.';
 
       emit({
-        ...emitBase, phase: 'done', tracksTotal: rows.length, tracksDone: rows.length,
+        ...emitBase,
+        phase: allSucceeded ? 'done' : (tracksConverted > 0 ? 'done' : 'error'),
+        tracksTotal: rows.length, tracksDone: tracksConverted,
         bytesBefore, bytesAfter,
-        message: `Saved ${prettyBytes(bytesBefore - bytesAfter)} on "${albumRow?.title ?? 'album'}"`,
+        message: summaryMsg,
       });
+
+      if (skipReasons.length > 0) {
+        process.stdout.write(`[convert] skipped tracks:\n${skipReasons.map((s) => `  - ${s}`).join('\n')}\n`);
+      }
 
       return {
-        ok: true,
-        tracksConverted: results.length,
+        ok: tracksConverted > 0,
+        tracksConverted,
+        tracksSkipped,
         bytesBefore,
         bytesAfter,
-        bytesSaved: bytesBefore - bytesAfter,
+        bytesSaved: Math.max(0, bytesBefore - bytesAfter),
       };
     } catch (err: any) {
+      // No rollback needed — the per-track loop commits as it goes, so a
+      // thrown exception here just stops further conversions. Tracks
+      // already committed stay committed; the current in-flight MP3 (if
+      // any) will be orphaned but that's a known, recoverable state (next
+      // run will overwrite it via ffmpeg's -y flag).
       emit({ ...emitBase, phase: 'error', message: err?.message ?? 'Unexpected error' });
       return { ok: false, error: err?.message ?? 'Unexpected error' };
     } finally {

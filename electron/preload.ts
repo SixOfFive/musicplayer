@@ -25,6 +25,7 @@ const api = {
     search: (q: string) => ipcRenderer.invoke(IPC.LIBRARY_SEARCH, q),
     largestAlbums: (limit?: number) => ipcRenderer.invoke(IPC.LIBRARY_LARGEST_ALBUMS, limit ?? 25),
     migrateCoverArt: () => ipcRenderer.invoke(IPC.LIBRARY_MIGRATE_COVER_ART),
+    revealInFolder: (targetPath: string) => ipcRenderer.invoke(IPC.LIBRARY_REVEAL_IN_FOLDER, targetPath),
     fileUrl: (p: string) => ipcRenderer.invoke(IPC.PLAYBACK_FILE_URL, p),
   },
   scan: {

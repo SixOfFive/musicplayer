@@ -23,14 +23,34 @@ export default function AlbumView() {
   const nav = useNavigate();
   const [album, setAlbum] = useState<AlbumMeta | null>(null);
   const [tracks, setTracks] = useState<RowTrack[]>([]);
+  // `loading` is true from mount until the first successful fetch OR
+  // until the fetch confirms the album doesn't exist. Previously we
+  // distinguished "album not yet loaded" from "album confirmed missing"
+  // only by `album === null`, which left the page on a permanent
+  // "Loading…" placeholder after a rescan deleted the album row.
+  const [loading, setLoading] = useState(true);
+  const [notFound, setNotFound] = useState(false);
   const [rescan, setRescan] = useState<null | { running: boolean; result?: { added: number; updated: number; removed: number; errors: number; message: string; albumDeleted: boolean } }>(null);
   const play = usePlayer((s) => s.play);
 
   const load = useCallback(() => {
+    setLoading(true);
     window.mp.library.album(aid).then((res: any) => {
-      setAlbum(res.album);
-      setTracks(res.tracks);
-    });
+      if (res?.album) {
+        setAlbum(res.album);
+        setTracks(res.tracks);
+        setNotFound(false);
+      } else {
+        // Backend returned { album: undefined } — album row doesn't exist
+        // in the DB. Could be because a rescan just removed it, or the
+        // user reached a stale /album/:id URL from history. Either way,
+        // show a proper dead-end page rather than spinning forever.
+        setAlbum(null);
+        setTracks([]);
+        setNotFound(true);
+      }
+      setLoading(false);
+    }).catch(() => setLoading(false));
   }, [aid]);
 
   useEffect(() => { load(); }, [load]);
@@ -47,17 +67,13 @@ export default function AlbumView() {
     try {
       const result = await (window.mp.scan as any).album(aid);
       setRescan({ running: false, result });
-      if (result?.albumDeleted) {
-        // Every track got removed — no album to show anymore. Kick the user
-        // back to the album grid rather than leave them on a 404-in-progress.
-        window.dispatchEvent(new CustomEvent('mp-library-changed'));
-        setTimeout(() => nav('/albums'), 1500);
-      } else {
-        // Re-fetch album + tracks so the UI reflects new metadata, added/
-        // removed tracks, etc.
-        load();
-        window.dispatchEvent(new CustomEvent('mp-library-changed'));
-      }
+      // Always re-fetch in place. If the album was actually deleted by the
+      // rescan (folder truly empty), load() will set notFound=true and the
+      // page switches to the dead-end state with a "Back to albums" button
+      // — NOT an automatic redirect that yanks the user out from under
+      // their current context.
+      load();
+      window.dispatchEvent(new CustomEvent('mp-library-changed'));
     } catch (err: any) {
       setRescan({ running: false, result: { added: 0, updated: 0, removed: 0, errors: 1, message: err?.message ?? 'Rescan failed', albumDeleted: false } });
     }
@@ -74,9 +90,52 @@ export default function AlbumView() {
     );
   }
 
-  if (!album) return <section className="p-8 text-text-muted">Loading…</section>;
+  if (loading && !album) return <section className="p-8 text-text-muted">Loading…</section>;
+  if (notFound || !album) {
+    return (
+      <section className="p-8">
+        <div className="text-xs uppercase tracking-wide text-text-muted">Album</div>
+        <h1 className="text-4xl font-extrabold my-2">Album not found</h1>
+        <p className="text-sm text-text-muted max-w-lg mb-6">
+          This album isn't in the library anymore — its folder may have been moved, renamed,
+          or emptied on disk, or a rescan found no audio files there. Its tracks may have
+          been reassigned to a different album row if their tags changed during a conversion.
+        </p>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => nav('/albums')}
+            className="px-4 py-1.5 rounded-full bg-accent text-black font-semibold text-sm"
+          >
+            Back to Albums
+          </button>
+          <button
+            onClick={load}
+            className="px-4 py-1.5 rounded-full bg-white/10 hover:bg-white/20 text-sm"
+          >
+            Try again
+          </button>
+        </div>
+      </section>
+    );
+  }
 
   const totalSec = tracks.reduce((n, t) => n + (t.duration_sec ?? 0), 0);
+
+  // Path shown on hover and opened on click when the user clicks the
+  // album art. Prefer the album's FOLDER (derived from a track) over
+  // the cover file itself — most users who click "show me this on disk"
+  // want to see the whole album directory, not just the jpg. Falls back
+  // to cover_art_path if we somehow have art but no tracks (shouldn't
+  // happen but belt-and-suspenders).
+  const albumFolderPath = tracks[0]?.path
+    ? tracks[0].path.replace(/[\\/][^\\/]+$/, '') // strip the filename to get the folder
+    : album.cover_art_path ?? null;
+  const revealAlbum = () => {
+    if (!albumFolderPath) return;
+    // Fire-and-forget — the IPC shows a native File Explorer / Finder
+    // window; there's nothing to do with the result in the UI.
+    void window.mp.library.revealInFolder(albumFolderPath);
+  };
 
   return (
     <section>
@@ -84,11 +143,17 @@ export default function AlbumView() {
         {album.cover_art_path ? (
           <img
             src={mediaUrl(album.cover_art_path)}
-            className="w-56 h-56 rounded shadow-2xl flex-shrink-0"
+            className="w-56 h-56 rounded shadow-2xl flex-shrink-0 cursor-pointer hover:ring-2 hover:ring-accent transition"
             alt=""
+            title={albumFolderPath ?? ''}
+            onClick={revealAlbum}
           />
         ) : (
-          <div className="w-56 h-56 rounded bg-bg-highlight flex-shrink-0" />
+          <div
+            className="w-56 h-56 rounded bg-bg-highlight flex-shrink-0 cursor-pointer hover:ring-2 hover:ring-accent transition"
+            title={albumFolderPath ?? ''}
+            onClick={revealAlbum}
+          />
         )}
         <div className="flex flex-col justify-end min-w-0 flex-1">
           <div className="text-xs uppercase tracking-wide text-text-muted">Album</div>

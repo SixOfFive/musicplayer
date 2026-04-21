@@ -270,6 +270,36 @@ export function registerLibraryIpc(ipcMain: IpcMain, _getWin: () => BrowserWindo
     return migrateCoverArtToAlbumFolders();
   });
 
+  /**
+   * Open the OS file manager focused on a path — like File Explorer's
+   * "Show in folder" / Finder's "Reveal in Finder". Used by the album
+   * cover click-through so users can jump from the player to the actual
+   * files on disk.
+   *
+   * Electron's `shell.showItemInFolder` wants an ABSOLUTE path to a
+   * FILE OR FOLDER. If the path happens not to exist (album metadata
+   * stale, file moved), we fall back to `shell.openPath` on the parent
+   * directory so the window still opens at a useful location instead
+   * of failing silently.
+   */
+  ipcMain.handle(IPC.LIBRARY_REVEAL_IN_FOLDER, async (_e, targetPath: string) => {
+    if (!targetPath) return { ok: false, error: 'No path provided' };
+    try {
+      const stat = await fs.stat(targetPath);
+      // showItemInFolder takes a file OR folder; either works.
+      shell.showItemInFolder(targetPath);
+      return { ok: true, kind: stat.isDirectory() ? 'folder' : 'file' };
+    } catch {
+      // Path doesn't exist — open the parent so the user can see where
+      // it USED to live and what's actually there now.
+      const { dirname } = await import('node:path');
+      const parent = dirname(targetPath);
+      const err = await shell.openPath(parent);
+      if (err) return { ok: false, error: err };
+      return { ok: true, kind: 'parent-fallback' };
+    }
+  });
+
   ipcMain.handle(IPC.PLAYBACK_FILE_URL, (_e, p: string) => {
     // Encode the path segment-by-segment so each separator becomes a URL slash.
     // (A single encodeURIComponent would escape the slashes, leaving the URL
