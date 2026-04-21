@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useLibrary } from '../store/library';
 import { LIKED_PLAYLIST_ID } from '../../shared/types';
+import { buildPlaylistTooltip } from '../lib/playlistTooltip';
 
 export default function PlaylistsView() {
   const playlists = useLibrary((s) => s.playlists);
@@ -102,6 +103,10 @@ export default function PlaylistsView() {
             <Link
               key={p.id}
               to={`/playlist/${p.id}`}
+              // Multi-line hover tooltip matching the AlbumCard pattern:
+              // name, optional description, stats (tracks · duration · size).
+              // See `src/lib/playlistTooltip.ts`.
+              title={buildPlaylistTooltip(p)}
               className="bg-bg-elev-1 hover:bg-bg-elev-2 rounded p-3 transition"
             >
               <div className={`aspect-square w-full rounded mb-2 flex items-center justify-center text-5xl ${isLiked ? 'bg-gradient-to-br from-purple-700 to-blue-400 text-white' : 'bg-bg-highlight text-text-muted'}`}>

@@ -5,11 +5,35 @@ import { exportPlaylist, removeExportedPlaylist, exportAllPlaylists, importPlayl
 
 export function registerPlaylistsIpc(ipcMain: IpcMain) {
   ipcMain.handle(IPC.PL_LIST, () => {
-    const likedCount = (getDb().prepare('SELECT COUNT(*) AS c FROM track_likes').get() as { c: number }).c;
+    // Aggregates for the virtual Liked Songs playlist. SUMs collapse to
+    // NULL on an empty table; COALESCE pins them at 0 so the renderer
+    // never has to guard against null.
+    const liked = getDb()
+      .prepare(`
+        SELECT COUNT(*)                         AS track_count,
+               COALESCE(SUM(t.duration_sec), 0) AS duration_sec,
+               COALESCE(SUM(t.size), 0)         AS bytes
+        FROM track_likes tl
+        JOIN tracks t ON t.id = tl.track_id
+      `)
+      .get() as { track_count: number; duration_sec: number; bytes: number };
+    // For manual playlists we pull count / duration / size as correlated
+    // subqueries rather than a single LEFT JOIN + GROUP BY — the grid is
+    // short (tens, not thousands) so the extra plan nodes don't matter
+    // and this keeps each column independent (no gotcha around cartesian
+    // multiplication if a track row is referenced twice).
     const rows = getDb()
       .prepare(`
         SELECT p.id, p.name, p.description, p.kind, p.created_at, p.updated_at,
-               (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id) AS track_count
+               (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id) AS track_count,
+               (SELECT COALESCE(SUM(t.duration_sec), 0)
+                FROM playlist_tracks pt
+                JOIN tracks t ON t.id = pt.track_id
+                WHERE pt.playlist_id = p.id)                                         AS duration_sec,
+               (SELECT COALESCE(SUM(t.size), 0)
+                FROM playlist_tracks pt
+                JOIN tracks t ON t.id = pt.track_id
+                WHERE pt.playlist_id = p.id)                                         AS bytes
         FROM playlists p
         ORDER BY p.updated_at DESC
       `)
@@ -20,7 +44,9 @@ export function registerPlaylistsIpc(ipcMain: IpcMain) {
         name: 'Liked Songs',
         description: 'Every track you liked, automatically.',
         kind: 'smart',
-        trackCount: likedCount,
+        trackCount: liked.track_count,
+        durationSec: liked.duration_sec,
+        bytes: liked.bytes,
         createdAt: 0,
         updatedAt: 0,
       },
@@ -30,6 +56,8 @@ export function registerPlaylistsIpc(ipcMain: IpcMain) {
         description: r.description,
         kind: r.kind,
         trackCount: r.track_count,
+        durationSec: r.duration_sec,
+        bytes: r.bytes,
         createdAt: r.created_at,
         updatedAt: r.updated_at,
       })),

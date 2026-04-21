@@ -95,7 +95,10 @@ export default function TrackRow({
         <div className="text-text-muted text-right">{index + 1}</div>
         <div className="min-w-0 flex items-center gap-3">
           {track.cover_art_path ? (
-            <img src={mediaUrl(track.cover_art_path)} className="w-9 h-9 rounded flex-shrink-0" alt="" />
+            // loading="lazy": Library / Playlist / Liked Songs can be
+            // thousands of rows; Chromium only fetches once the row is
+            // scrolled near the viewport.
+            <img src={mediaUrl(track.cover_art_path)} loading="lazy" decoding="async" className="w-9 h-9 rounded flex-shrink-0" alt="" />
           ) : <div className="w-9 h-9 rounded bg-bg-highlight flex-shrink-0" />}
           <div className="min-w-0">
             <div className="truncate text-text-primary">{track.title}</div>

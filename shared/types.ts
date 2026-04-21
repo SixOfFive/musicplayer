@@ -236,6 +236,15 @@ export interface Playlist {
   description: string | null;
   kind: 'manual' | 'smart';
   trackCount: number;
+  /** Sum of `tracks.duration_sec` across all tracks in the playlist. 0 if
+   *  unknown / no tracks. Populated by `pl:list` so the Playlists grid
+   *  can show a hover tooltip analogous to album cards without needing a
+   *  second round-trip per card. */
+  durationSec?: number;
+  /** Sum of `tracks.size` (on-disk bytes) across all tracks. Same
+   *  rationale as `durationSec`. Not a guarantee of cumulative play
+   *  bandwidth — a track referenced twice counts twice. */
+  bytes?: number;
   createdAt: number;
   updatedAt: number;
 }

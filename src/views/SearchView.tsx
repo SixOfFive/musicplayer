@@ -238,7 +238,7 @@ export default function SearchView() {
               >
                 <span className="text-xs text-text-muted w-6 text-right tabular-nums flex-shrink-0">{i + 1}</span>
                 {a.coverArtPath ? (
-                  <img src={mediaUrl(a.coverArtPath)} alt="" className="w-10 h-10 rounded object-cover flex-shrink-0" />
+                  <img src={mediaUrl(a.coverArtPath)} loading="lazy" decoding="async" alt="" className="w-10 h-10 rounded object-cover flex-shrink-0" />
                 ) : (
                   <div className="w-10 h-10 rounded bg-bg-highlight flex-shrink-0" />
                 )}
@@ -357,7 +357,7 @@ function AlbumCardMini({ album, onClick }: { album: SearchAlbumHit; onClick: () 
     <div onClick={onClick} className="cursor-pointer group" title={tooltip}>
       <div className="aspect-square rounded bg-bg-highlight overflow-hidden mb-2 relative">
         {album.coverArtPath ? (
-          <img src={mediaUrl(album.coverArtPath)} alt="" className="w-full h-full object-cover group-hover:scale-[1.03] transition" />
+          <img src={mediaUrl(album.coverArtPath)} loading="lazy" decoding="async" alt="" className="w-full h-full object-cover group-hover:scale-[1.03] transition" />
         ) : (
           <div className="w-full h-full flex items-center justify-center text-3xl text-text-muted">♪</div>
         )}

@@ -83,7 +83,7 @@ export default function Home() {
               >
                 <div className="relative aspect-square w-full mb-2">
                   {t.coverArtPath ? (
-                    <img src={mediaUrl(t.coverArtPath)} className="w-full h-full rounded" alt="" />
+                    <img src={mediaUrl(t.coverArtPath)} loading="lazy" decoding="async" className="w-full h-full rounded" alt="" />
                   ) : <div className="w-full h-full rounded bg-bg-highlight" />}
                   <div className="absolute bottom-1 right-1 w-8 h-8 rounded-full bg-accent text-black flex items-center justify-center text-sm shadow-lg opacity-0 group-hover:opacity-100 transition">▶</div>
                 </div>

@@ -3,6 +3,7 @@ import { useLibrary } from '../store/library';
 import { useRef, useState } from 'react';
 import { LIKED_PLAYLIST_ID } from '../../shared/types';
 import EqualizerPanel from './EqualizerPanel';
+import { buildPlaylistTooltip } from '../lib/playlistTooltip';
 
 export default function Sidebar() {
   const playlists = useLibrary((s) => s.playlists);
@@ -69,27 +70,37 @@ export default function Sidebar() {
             />
           </div>
         )}
-        <NavLink
-          to={`/playlist/${LIKED_PLAYLIST_ID}`}
-          className={({ isActive }) =>
-            `flex items-center gap-3 px-3 py-2 rounded hover:bg-bg-elev-1 ${isActive ? 'bg-bg-elev-1 text-text-primary' : ''}`
-          }
-        >
-          <div className="w-10 h-10 rounded bg-gradient-to-br from-purple-700 to-blue-400 flex items-center justify-center">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="white"><path d="M12 21s-7-4.35-7-10a5 5 0 019-3 5 5 0 019 3c0 5.65-7 10-7 10z"/></svg>
-          </div>
-          <div className="min-w-0">
-            <div className="text-sm text-text-primary truncate">Liked Songs</div>
-            <div className="text-xs text-text-muted">
-              {playlists.find((p) => p.id === LIKED_PLAYLIST_ID)?.trackCount ?? 0} songs
-            </div>
-          </div>
-        </NavLink>
+        {/* Liked Songs is rendered by hand (separate gradient swatch) but
+            uses the same tooltip builder as the rest of the playlists so
+            a hover reveals tracks · runtime · size here too. */}
+        {(() => {
+          const liked = playlists.find((p) => p.id === LIKED_PLAYLIST_ID);
+          return (
+            <NavLink
+              to={`/playlist/${LIKED_PLAYLIST_ID}`}
+              title={liked ? buildPlaylistTooltip(liked) : 'Liked Songs'}
+              className={({ isActive }) =>
+                `flex items-center gap-3 px-3 py-2 rounded hover:bg-bg-elev-1 ${isActive ? 'bg-bg-elev-1 text-text-primary' : ''}`
+              }
+            >
+              <div className="w-10 h-10 rounded bg-gradient-to-br from-purple-700 to-blue-400 flex items-center justify-center">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="white"><path d="M12 21s-7-4.35-7-10a5 5 0 019-3 5 5 0 019 3c0 5.65-7 10-7 10z"/></svg>
+              </div>
+              <div className="min-w-0">
+                <div className="text-sm text-text-primary truncate">Liked Songs</div>
+                <div className="text-xs text-text-muted">
+                  {liked?.trackCount ?? 0} songs
+                </div>
+              </div>
+            </NavLink>
+          );
+        })()}
 
         {playlists.filter((p) => p.id !== LIKED_PLAYLIST_ID).map((p) => (
           <NavLink
             key={p.id}
             to={`/playlist/${p.id}`}
+            title={buildPlaylistTooltip(p)}
             className={({ isActive }) =>
               `flex items-center gap-3 px-3 py-2 rounded hover:bg-bg-elev-1 ${isActive ? 'bg-bg-elev-1 text-text-primary' : ''}`
             }

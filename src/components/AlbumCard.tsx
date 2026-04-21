@@ -29,7 +29,7 @@ interface Props {
  * header metadata line so hover tooltips look consistent with the
  * page content.
  */
-function formatDuration(sec: number | null | undefined): string | null {
+export function formatDuration(sec: number | null | undefined): string | null {
   if (!sec || sec <= 0) return null;
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
@@ -94,9 +94,13 @@ export default function AlbumCard({ album, minSavingsPercent = 5 }: Props) {
       title={tooltip}
       className="group relative bg-bg-elev-1 hover:bg-bg-elev-2 p-3 rounded cursor-pointer transition"
     >
+      {/* loading="lazy" on the <img>: the Albums grid can be 600+ cards;
+          firing 600 IPC round-trips on page open is wasteful even when
+          every one is a cache hit. Chromium only fetches once the card
+          is within a few hundred px of the viewport. */}
       <div className="relative aspect-square w-full mb-2">
         {album.cover_art_path ? (
-          <img src={mediaUrl(album.cover_art_path)} className="w-full h-full rounded" alt="" />
+          <img src={mediaUrl(album.cover_art_path)} loading="lazy" decoding="async" className="w-full h-full rounded" alt="" />
         ) : (
           <div className="w-full h-full rounded bg-bg-highlight" />
         )}

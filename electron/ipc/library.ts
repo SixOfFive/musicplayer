@@ -161,10 +161,18 @@ export function registerLibraryIpc(ipcMain: IpcMain, _getWin: () => BrowserWindo
         WHERE al.id = ?
       `)
       .get(id);
+    // Join the owning album so each track row carries `cover_art_path`.
+    // Without this, the per-track thumbnail on the album view falls
+    // through to the grey placeholder — every other tracklist view
+    // (Playlist, Library, Artist, Search) already joins the album here
+    // and renders real thumbs, so tracks on the album page looked
+    // inconsistent by comparison.
     const tracks = getDb()
       .prepare(`
-        SELECT t.*, ar.name AS artist
-        FROM tracks t LEFT JOIN artists ar ON ar.id = t.artist_id
+        SELECT t.*, ar.name AS artist, al.cover_art_path AS cover_art_path
+        FROM tracks t
+        LEFT JOIN artists ar ON ar.id = t.artist_id
+        LEFT JOIN albums  al ON al.id = t.album_id
         WHERE t.album_id = ?
         ORDER BY disc_no, track_no
       `)
