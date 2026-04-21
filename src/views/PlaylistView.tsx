@@ -65,11 +65,12 @@ export default function PlaylistView() {
       <div className="px-8 pb-10">
         <ScanProgressPanel />
         <div className="bg-bg-elev-1/40 rounded">
-          <div className="grid grid-cols-[24px_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_72px_40px] gap-3 px-4 py-2 border-b border-white/5">
+          <div className="grid grid-cols-[24px_minmax(0,1.3fr)_minmax(0,1fr)_minmax(0,0.9fr)_92px_72px_40px] gap-3 px-4 py-2 border-b border-white/5">
             <div className="text-right text-text-muted text-xs">#</div>
             <SortHeader col="title" label="Title" sortBy={sortBy} sortDir={sortDir} onChange={setSort} />
             <SortHeader col="album" label="Album" sortBy={sortBy} sortDir={sortDir} onChange={setSort} />
             <SortHeader col="artist" label="Artist" sortBy={sortBy} sortDir={sortDir} onChange={setSort} />
+            <div className="text-xs uppercase tracking-wide text-text-muted">Quality</div>
             <SortHeader col="duration" label="Length" sortBy={sortBy} sortDir={sortDir} onChange={setSort} align="right" />
             <div />
           </div>

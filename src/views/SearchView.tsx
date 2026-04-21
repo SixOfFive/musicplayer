@@ -29,6 +29,11 @@ function toRowTrack(t: SearchTrackHit): RowTrack {
     album: t.album,
     duration_sec: t.durationSec,
     cover_art_path: t.coverArtPath,
+    // Pass-through the quality fields so TrackRow can render the
+    // "FLAC 96 kHz" / "MP3 320k" label on search result rows too.
+    codec: t.codec ?? null,
+    bitrate: t.bitrate ?? null,
+    sample_rate: t.sampleRate ?? null,
   };
 }
 
@@ -278,11 +283,12 @@ export default function SearchView() {
       {results.tracks.length > 0 && (
         <div className="mb-8">
           <h2 className="text-lg font-bold mb-3">Tracks <span className="text-text-muted text-sm font-normal">({results.tracks.length})</span></h2>
-          <div className="grid grid-cols-[24px_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_72px_40px] items-center text-xs text-text-muted uppercase tracking-wider border-b border-white/5 pb-2 px-2">
+          <div className="grid grid-cols-[24px_minmax(0,1.3fr)_minmax(0,1fr)_minmax(0,0.9fr)_92px_72px_40px] items-center text-xs text-text-muted uppercase tracking-wider border-b border-white/5 pb-2 px-2">
             <span>#</span>
             <span>Title</span>
-            <span>Artist</span>
             <span>Album</span>
+            <span>Artist</span>
+            <span>Quality</span>
             <span className="text-right">Length</span>
             <span></span>
           </div>

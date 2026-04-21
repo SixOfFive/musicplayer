@@ -27,6 +27,9 @@ export default function Home() {
   const [stats, setStats] = useState<LibraryStats | null>(null);
   const [newestExpanded, setNewestExpanded] = useState(false);
   const play = usePlayer((s) => s.play);
+  // Narrow selector so the Recently-Added grid only re-renders when
+  // the currently-playing track id changes, not every scrubber tick.
+  const nowPlayingId = usePlayer((s) => s.queue[s.index]?.id ?? null);
   const nav = useNavigate();
 
   async function playRecent(trackId: number) {
@@ -75,22 +78,32 @@ export default function Home() {
         <div className="mb-8">
           <h2 className="text-xl font-semibold mb-3">Recently added</h2>
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-3">
-            {stats.mostRecentlyAdded.map((t) => (
-              <div
-                key={t.id}
-                onClick={() => playRecent(t.id)}
-                className="group relative bg-bg-elev-1 hover:bg-bg-elev-2 rounded p-2 transition cursor-pointer"
-              >
-                <div className="relative aspect-square w-full mb-2">
-                  {t.coverArtPath ? (
-                    <img src={mediaUrl(t.coverArtPath)} loading="lazy" decoding="async" className="w-full h-full rounded" alt="" />
-                  ) : <div className="w-full h-full rounded bg-bg-highlight" />}
-                  <div className="absolute bottom-1 right-1 w-8 h-8 rounded-full bg-accent text-black flex items-center justify-center text-sm shadow-lg opacity-0 group-hover:opacity-100 transition">▶</div>
+            {stats.mostRecentlyAdded.map((t) => {
+              const isNowPlaying = nowPlayingId === t.id;
+              return (
+                <div
+                  key={t.id}
+                  onClick={() => playRecent(t.id)}
+                  className={`group relative rounded p-2 transition cursor-pointer ${
+                    isNowPlaying
+                      ? 'bg-emerald-500/15 hover:bg-emerald-500/20 ring-1 ring-emerald-500/30'
+                      : 'bg-bg-elev-1 hover:bg-bg-elev-2'
+                  }`}
+                >
+                  <div className="relative aspect-square w-full mb-2">
+                    {t.coverArtPath ? (
+                      <img src={mediaUrl(t.coverArtPath)} loading="lazy" decoding="async" className="w-full h-full rounded" alt="" />
+                    ) : <div className="w-full h-full rounded bg-bg-highlight" />}
+                    {isNowPlaying && (
+                      <div className="absolute top-1 left-1 bg-emerald-500 text-black rounded px-1.5 py-0.5 text-[10px] font-semibold shadow">▸ Playing</div>
+                    )}
+                    <div className="absolute bottom-1 right-1 w-8 h-8 rounded-full bg-accent text-black flex items-center justify-center text-sm shadow-lg opacity-0 group-hover:opacity-100 transition">▶</div>
+                  </div>
+                  <div className={`text-xs font-medium truncate ${isNowPlaying ? 'text-emerald-300' : ''}`}>{t.title}</div>
+                  <div className="text-[10px] text-text-muted truncate">{t.artist ?? '—'}</div>
                 </div>
-                <div className="text-xs font-medium truncate">{t.title}</div>
-                <div className="text-[10px] text-text-muted truncate">{t.artist ?? '—'}</div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}

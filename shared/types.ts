@@ -731,6 +731,12 @@ export interface SearchTrackHit {
   durationSec: number | null;
   coverArtPath: string | null;
   path: string;
+  // Quality — optional because older preloads / cached responses may
+  // not include them. Rendered as a compact "FLAC 96 kHz" label next
+  // to the artist in SearchView after toRowTrack() passes them through.
+  codec?: string | null;
+  bitrate?: number | null;
+  sampleRate?: number | null;
 }
 export interface SearchAlbumHit {
   id: number;
@@ -851,6 +857,11 @@ export interface SuggestionEntry {
   cover_art_path: string | null;
   year: number | null;
   genre: string | null;
+  // Quality fields — rendered as a compact "FLAC 96 kHz" / "MP3 320k"
+  // label under the title so the user can see the format at a glance.
+  codec: string | null;
+  bitrate: number | null;
+  sample_rate: number | null;
   liked: boolean;
   score: number;
   /** Primary driver of this track's score. Used to caption the

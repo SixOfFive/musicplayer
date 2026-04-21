@@ -211,6 +211,7 @@ export function registerLibraryIpc(ipcMain: IpcMain, _getWin: () => BrowserWindo
 
     const tracks = db.prepare(`
       SELECT t.id, t.title, t.path, t.duration_sec AS durationSec,
+             t.codec, t.bitrate, t.sample_rate AS sampleRate,
              ar.name AS artist, ar.id AS artistId,
              al.title AS album, al.id AS albumId, al.cover_art_path AS coverArtPath
       FROM tracks t

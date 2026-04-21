@@ -265,13 +265,47 @@ export const usePlayer = create<PlayerState>((set, get) => {
     // without Xing header, some FLACs). `loadedmetadata` / `durationchange`
     // below will upgrade to the element's exact value once it's known.
     if (typeof cur.durationSec === 'number' && cur.durationSec > 0) {
-      set({ duration: cur.durationSec });
+      set({ duration: cur.durationSec, isPlaying: true });
     } else {
-      set({ duration: 0 });
+      set({ duration: 0, isPlaying: true });
     }
     startAccounting(cur.id, cur.durationSec, cur.artist, cur.title, cur.album);
-    try { await engine.play(); }
-    catch (err) { console.error('[player] engine.play failed', err); }
+    // Starting a brand-new track: position is 0 by definition. Set this
+    // explicitly so the scrubber jumps to the left edge before the
+    // first `timeupdate` event fires; otherwise the old track's
+    // position value lingers for a frame which looks like the seek
+    // didn't take.
+    set({ position: 0 });
+    // engine.play() can reject with an AbortError if the just-issued
+    // load() interrupts the play request — typical path when the user
+    // was paused, hit Next, and Chromium tore down the previous
+    // play-intent before reissuing. The element queues the new src
+    // internally but does NOT auto-resume after the rejection, so we
+    // retry once the element signals it's playable. Without this,
+    // advancing while paused would silently leave the new track loaded
+    // but stopped — user sees the play button instead of pause.
+    try {
+      await engine.play();
+    } catch (err: any) {
+      const isAbort = err?.name === 'AbortError' || /interrupted/i.test(err?.message ?? '');
+      if (!isAbort) {
+        console.error('[player] engine.play failed (non-abort)', err);
+      }
+      // Retry once the element has enough data to start. `canplay`
+      // fires before `canplaythrough`, so we play at the earliest
+      // opportunity. `{ once: true }` means the listener disposes
+      // itself and won't fire for later tracks.
+      const retry = () => {
+        engine.play().catch((e2: any) => {
+          // Swallow the second AbortError too — happens if the user
+          // hits Next again before `canplay` fires. The third round
+          // will self-correct. Non-abort errors are logged.
+          const again = e2?.name === 'AbortError' || /interrupted/i.test(e2?.message ?? '');
+          if (!again) console.error('[player] engine.play retry failed', e2);
+        });
+      };
+      engine.element.addEventListener('canplay', retry, { once: true });
+    }
   }
 
   // tick

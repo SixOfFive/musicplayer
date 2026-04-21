@@ -3,6 +3,7 @@ import { usePlayer } from '../store/player';
 import { useLibrary } from '../store/library';
 import { LIKED_PLAYLIST_ID } from '../../shared/types';
 import { mediaUrl } from '../lib/mediaUrl';
+import { formatQuality } from '../lib/formatQuality';
 
 export interface RowTrack {
   id: number;
@@ -13,6 +14,12 @@ export interface RowTrack {
   duration_sec: number | null;
   cover_art_path?: string | null;
   size?: number;
+  // Quality fields — optional because not every code path has pulled
+  // them yet. When present, TrackRow shows a compact quality label
+  // (e.g. "FLAC 96 kHz" / "MP3 320k") next to the artist subtitle.
+  codec?: string | null;
+  bitrate?: number | null;       // bits per second
+  sample_rate?: number | null;   // Hz
 }
 
 function fmt(sec: number | null) {
@@ -28,6 +35,13 @@ export default function TrackRow({
   const play = usePlayer((s) => s.play);
   const liked = usePlayer((s) => s.likedIds.has(track.id));
   const toggleLike = usePlayer((s) => s.toggleLike);
+  // Highlight-when-playing: subscribe to a narrow slice (the current
+  // track's id) so a row only re-renders when IT becomes active or
+  // stops being active, not on every scrubber tick.
+  const isNowPlaying = usePlayer((s) => {
+    const cur = s.queue[s.index];
+    return !!cur && cur.id === track.id;
+  });
   const playlists = useLibrary((s) => s.playlists);
   const refreshPlaylists = useLibrary((s) => s.refreshPlaylists);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
@@ -90,9 +104,18 @@ export default function TrackRow({
         onClick={playHere}
         onContextMenu={(e) => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY }); }}
         data-alpha-letter={alphaLetter}
-        className="grid grid-cols-[24px_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_72px_40px] gap-3 items-center px-4 py-2 text-sm rounded hover:bg-white/5 cursor-pointer select-none"
+        className={`grid grid-cols-[24px_minmax(0,1.3fr)_minmax(0,1fr)_minmax(0,0.9fr)_92px_72px_40px] gap-3 items-center px-4 py-2 text-sm rounded cursor-pointer select-none ${
+          isNowPlaying
+            ? 'bg-emerald-500/15 hover:bg-emerald-500/20 ring-1 ring-emerald-500/30'
+            : 'hover:bg-white/5'
+        }`}
       >
-        <div className="text-text-muted text-right">{index + 1}</div>
+        {/* Track # → ▸ glyph when this row is the current track. The
+            pulse draws the eye without being a full animation — Spotify
+            + Apple Music both do a similar thing. */}
+        <div className={`text-right ${isNowPlaying ? 'text-emerald-400' : 'text-text-muted'}`}>
+          {isNowPlaying ? '▸' : index + 1}
+        </div>
         <div className="min-w-0 flex items-center gap-3">
           {track.cover_art_path ? (
             // loading="lazy": Library / Playlist / Liked Songs can be
@@ -101,13 +124,21 @@ export default function TrackRow({
             <img src={mediaUrl(track.cover_art_path)} loading="lazy" decoding="async" className="w-9 h-9 rounded flex-shrink-0" alt="" />
           ) : <div className="w-9 h-9 rounded bg-bg-highlight flex-shrink-0" />}
           <div className="min-w-0">
-            <div className="truncate text-text-primary">{track.title}</div>
+            <div className={`truncate ${isNowPlaying ? 'text-emerald-300 font-medium' : 'text-text-primary'}`}>{track.title}</div>
             <div className="truncate text-xs text-text-muted">{track.artist ?? ''}</div>
           </div>
         </div>
         <div className="min-w-0 truncate text-text-secondary">{track.album ?? ''}</div>
         <div className="min-w-0 truncate text-text-muted">{track.artist ?? ''}</div>
-        <div className="text-text-secondary text-right tabular-nums">{fmt(track.duration_sec)}</div>
+        {/* Dedicated Quality column — previous attempt to inline this
+            inside the artist subtitle got eaten by the parent's
+            `truncate`. A fixed-width column ensures the chip is
+            always visible, truncating its own content if a codec
+            name somehow gets too long. */}
+        <div className="min-w-0 truncate text-xs text-text-muted tabular-nums" title="Format / bitrate / sample rate">
+          {formatQuality(track.codec, track.bitrate, track.sample_rate) ?? ''}
+        </div>
+        <div className={`text-right tabular-nums ${isNowPlaying ? 'text-emerald-400' : 'text-text-secondary'}`}>{fmt(track.duration_sec)}</div>
         <button
           onClick={(e) => { e.stopPropagation(); toggleLike(track.id); }}
           className={`text-lg ${liked ? 'text-accent' : 'text-text-muted hover:text-text-primary'}`}

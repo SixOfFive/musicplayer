@@ -16,6 +16,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { usePlayer } from '../store/player';
 import { mediaUrl } from '../lib/mediaUrl';
+import { formatQuality } from '../lib/formatQuality';
 import type { SuggestionEntry } from '../../shared/types';
 
 // How many rows appear on first render, and how many more we reveal
@@ -70,6 +71,10 @@ export default function SuggestedView() {
   const play = usePlayer((s) => s.play);
   const toggleLike = usePlayer((s) => s.toggleLike);
   const likedIds = usePlayer((s) => s.likedIds);
+  // Highlight-when-playing: narrow selector picks just the current
+  // track id so each row only re-renders when IT becomes active
+  // (or stops), not on every scrubber tick.
+  const nowPlayingId = usePlayer((s) => s.queue[s.index]?.id ?? null);
 
   async function refresh() {
     setErr(null);
@@ -174,13 +179,20 @@ export default function SuggestedView() {
         <div className="space-y-1">
           {items.slice(0, visible).map((e, i) => {
             const liked = likedIds.has(e.id);
+            const isNowPlaying = nowPlayingId === e.id;
             return (
               <div
                 key={e.id}
                 onClick={() => playFrom(i)}
-                className="grid grid-cols-[32px_40px_minmax(0,2fr)_minmax(0,1.2fr)_minmax(0,1fr)_64px_32px] gap-3 items-center px-3 py-1.5 rounded hover:bg-white/5 cursor-pointer text-sm"
+                className={`grid grid-cols-[32px_40px_minmax(0,2fr)_minmax(0,1.2fr)_minmax(0,1fr)_64px_32px] gap-3 items-center px-3 py-1.5 rounded cursor-pointer text-sm ${
+                  isNowPlaying
+                    ? 'bg-emerald-500/15 hover:bg-emerald-500/20 ring-1 ring-emerald-500/30'
+                    : 'hover:bg-white/5'
+                }`}
               >
-                <div className="text-text-muted tabular-nums text-right text-xs">{i + 1}</div>
+                <div className={`tabular-nums text-right text-xs ${isNowPlaying ? 'text-emerald-400' : 'text-text-muted'}`}>
+                  {isNowPlaying ? '▸' : i + 1}
+                </div>
                 {e.cover_art_path ? (
                   <img
                     src={mediaUrl(e.cover_art_path)}
@@ -193,8 +205,14 @@ export default function SuggestedView() {
                   <div className="w-10 h-10 rounded bg-bg-highlight flex-shrink-0" />
                 )}
                 <div className="min-w-0">
-                  <div className="truncate text-text-primary">{e.title}</div>
-                  <div className="truncate text-xs text-text-muted">{e.artist ?? ''}</div>
+                  <div className={`truncate ${isNowPlaying ? 'text-emerald-300 font-medium' : 'text-text-primary'}`}>{e.title}</div>
+                  <div className="truncate text-xs text-text-muted">
+                    {e.artist ?? ''}
+                    {(() => {
+                      const q = formatQuality(e.codec, e.bitrate, e.sample_rate);
+                      return q ? <span className="text-text-muted/70"> · {q}</span> : null;
+                    })()}
+                  </div>
                 </div>
                 <div className="min-w-0 truncate text-text-secondary text-xs">{e.album ?? ''}</div>
                 <div className="min-w-0">

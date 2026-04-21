@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useRef } from 'react';
 
 /**
  * A-Z jump rail for long sorted lists (Albums, Artists, etc.). Fixed to the
@@ -57,11 +57,57 @@ export default function AlphaRail({ items, labelOf, emptyLabel }: Props) {
     return set;
   }, [items, labelOf]);
 
+  // Cycle-through-section state. Pressing T once lands on the first
+  // T-item; pressing T again advances to the second T-item, and so on.
+  // When you run out, it wraps back to the first. Switching to a
+  // different letter resets the index. Kept in refs so re-renders
+  // triggered by the underlying list (new items arriving, filter
+  // changes) don't jitter the cycle.
+  const lastLetterRef = useRef<string | null>(null);
+  const letterIndexRef = useRef<number>(0);
+
   function jump(letter: string) {
-    // `querySelector` walks the document, returning the FIRST match — which
-    // in a sorted list is exactly the start of the letter's section.
-    const el = document.querySelector(`[data-alpha-letter="${letter}"]`);
-    if (el) (el as HTMLElement).scrollIntoView({ behavior: 'smooth', block: 'start' });
+    // Grab every element under this letter in DOM order — the list is
+    // sorted, so DOM order is the same as alphabetical order within
+    // the letter group.
+    const all = document.querySelectorAll(`[data-alpha-letter="${letter}"]`);
+    if (all.length === 0) return;
+
+    // Pick the index: reset to 0 on letter change, otherwise advance
+    // and wrap. Wrapping (instead of clamping) gives a natural "keep
+    // pressing to explore everything under this letter" feel rather
+    // than silently dead-ending on the last item.
+    let idx: number;
+    if (lastLetterRef.current !== letter) {
+      idx = 0;
+    } else {
+      idx = (letterIndexRef.current + 1) % all.length;
+    }
+    lastLetterRef.current = letter;
+    letterIndexRef.current = idx;
+
+    const el = all[idx] as HTMLElement;
+
+    // Explicit scroll computation rather than `el.scrollIntoView()`.
+    // scrollIntoView's smooth-animation path is inconsistent when
+    // called repeatedly in quick succession (clicks mid-flight can
+    // land off-target); computing scrollTop ourselves keeps the final
+    // position deterministic + gives us control over the top offset.
+    let scroller: HTMLElement | null = el.parentElement;
+    while (scroller) {
+      const style = getComputedStyle(scroller);
+      const canScroll = /(auto|scroll|overlay)/.test(style.overflowY);
+      if (canScroll && scroller.scrollHeight > scroller.clientHeight) break;
+      scroller = scroller.parentElement;
+    }
+    if (!scroller) scroller = (document.scrollingElement ?? document.documentElement) as HTMLElement;
+
+    const elRect = el.getBoundingClientRect();
+    const scRect = scroller.getBoundingClientRect();
+    // 8px of breathing room above the target so it isn't flush against
+    // the viewport edge / any floating chrome above.
+    const target = scroller.scrollTop + (elRect.top - scRect.top) - 8;
+    scroller.scrollTo({ top: Math.max(0, target), behavior: 'smooth' });
   }
 
   return (
