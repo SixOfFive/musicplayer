@@ -68,6 +68,10 @@ const api = {
     recordPlay: (trackId: number, listenedSec: number, completed: boolean) =>
       ipcRenderer.invoke(IPC.STATS_RECORD_PLAY, trackId, listenedSec, completed),
     overview: () => ipcRenderer.invoke(IPC.STATS_OVERVIEW),
+    // Fat aggregate dump for the fun-fact banner. Called once per
+    // LibraryStatsPanel mount; the returned object is memoised and
+    // the panel reshuffles fact order per session.
+    neat: () => ipcRenderer.invoke(IPC.STATS_NEAT),
   },
   update: {
     info: () => ipcRenderer.invoke(IPC.UPDATE_INFO),
@@ -199,9 +203,11 @@ const api = {
     },
   },
   // Local recommendation engine. `limit` clamped server-side to [1,500];
-  // default 100 if omitted.
+  // default 100 if omitted. `seed` is optional: passing a number applies
+  // score jitter + artist/album diversification so every call produces
+  // a visibly different ordering. Omit for deterministic results.
   suggestions: {
-    get: (limit?: number) => ipcRenderer.invoke(IPC.SUGGESTIONS_GET, limit),
+    get: (limit?: number, seed?: number) => ipcRenderer.invoke(IPC.SUGGESTIONS_GET, limit, seed),
   },
   convert: {
     checkAvailable: () => ipcRenderer.invoke(IPC.CONVERT_CHECK_AVAILABLE),

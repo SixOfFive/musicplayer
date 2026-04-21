@@ -356,6 +356,9 @@ export const IPC = {
   // track_likes + track attributes (artist / album / genre / year).
   // No external calls, no ML — pure scoring over the user's own data.
   SUGGESTIONS_GET: 'suggestions:get',
+  // Fat aggregate dump for the fun-fact banner. Computed on demand —
+  // the panel fetches once per mount and reshuffles the fact order.
+  STATS_NEAT: 'stats:neat',
   // Visualizer plugins
   VIS_LIST: 'vis:list',
   VIS_SCAN_DIRS: 'vis:scan-dirs',
@@ -570,6 +573,123 @@ export interface StatsOverview {
   sessionCount: number;
   avgSessionSec: number;
   mostPlayedDay: { date: string; sec: number } | null; // biggest single-day listening
+}
+
+/**
+ * Rich aggregate dump for the fun-fact banner. Each field answers a
+ * specific question a fun fact can be written around — nothing here
+ * is used by regular views, so the shape is allowed to stay big and
+ * loose. All values are optional in spirit (zero / empty / null is a
+ * valid "I don't have this data yet" response); fact templates guard
+ * their preconditions before emitting.
+ *
+ * Computed via a single `stats:neat` IPC that runs ~20 cheap SQL
+ * aggregates inside one transaction. Called once per LibraryStatsPanel
+ * mount; results are memoised across the session.
+ */
+export interface NeatStats {
+  /** Tracks grouped by release decade ("1970s", "1980s", etc.). Sorted
+   *  by decade ascending. Useful for "N% of your collection is from
+   *  the 1990s" style facts. */
+  decadeDistribution: Array<{ decade: string; trackCount: number; bytes: number }>;
+
+  /** How many tracks have been played from each decade (joining
+   *  decade bucket with play_count). Null plays default to 0. */
+  decadePlayDistribution: Array<{ decade: string; playCount: number; listenedSec: number }>;
+
+  /** File-format breakdown. Keys are codec strings ('flac', 'mp3',
+   *  'aac', etc.) as stored in tracks.codec (lowercased). */
+  codecDistribution: Record<string, number>;
+
+  /** Bitrate tiers across the library.
+   *  - lossless  : FLAC / WAV / ALAC — tracks.codec matches known lossless
+   *  - highMp3   : bitrate >= 256 kbps
+   *  - stdMp3    : 192-255
+   *  - lowMp3    : < 192 */
+  bitrateTiers: { lossless: number; highMp3: number; stdMp3: number; lowMp3: number };
+
+  /** Average bitrate across non-lossless tracks (kbps). 0 if none. */
+  avgBitrateKbps: number;
+
+  /** Artists with the most tracks in the library. Top 5. */
+  mostProlificArtistsByTracks: Array<{ name: string; trackCount: number }>;
+
+  /** Artists with the most albums. Top 5. */
+  mostProlificArtistsByAlbums: Array<{ name: string; albumCount: number }>;
+
+  /** How many artists have exactly one track in the library. Rich
+   *  "one-hit wonder" / "long tail" facts live on this. */
+  singleTrackArtistCount: number;
+
+  /** Albums with one or two tracks — usually singles / EPs. */
+  shortAlbumCount: number;
+
+  /** Albums where every single track has been played at least once. */
+  fullyHeardAlbumCount: number;
+
+  /** Albums where no track has ever been played. */
+  unheardAlbumCount: number;
+
+  /** Tracks never played AND never liked. Pure background-collection mass. */
+  untouchedTrackCount: number;
+
+  /** Longest + shortest track titles in the library (characters). */
+  longestTitle: { title: string; artist: string | null; length: number } | null;
+  shortestTitle: { title: string; artist: string | null; length: number } | null;
+
+  /** Single most-frequent non-stopword in track titles. ("love" and
+   *  "baby" are famously common; letting the user see their own
+   *  top title word is delightful.) */
+  mostCommonTitleWord: { word: string; count: number } | null;
+
+  /** Liked analytics. */
+  likedRuntimeSec: number;          // total duration of liked tracks
+  likedNeverPlayed: number;         // liked but never played
+  likedAvgPlayCount: number;        // avg play_count across liked tracks
+
+  /** Completion rate: fraction of play_events where `completed = 1`.
+   *  Captures skip behaviour. 0 if no plays yet. */
+  completionRate: number;
+  totalPlayEvents: number;
+
+  /** Median play_count per track (across tracks that have been
+   *  played at least once). Captures "do I rotate a lot of tracks
+   *  lightly, or a few a lot?" */
+  medianPlayCount: number;
+
+  /** % of all plays that are of the top genre. Captures
+   *  single-genre-focused vs eclectic behavior. */
+  topGenrePlayShare: number;
+
+  /** Weighted average release year of tracks played (play_count as
+   *  weight). A user who plays mostly 1970s will see ~1975 here. */
+  avgPlayedYear: number | null;
+
+  /** Tracks added to the library this calendar year. */
+  tracksAddedThisYear: number;
+
+  /** Estimated bytes transferred during all playback. Back-of-
+   *  envelope: sum(play_count × track.size). Not bandwidth
+   *  accurate but a fun unit to compare against floppy disks. */
+  estimatedPlaybackBytes: number;
+
+  /** Album with the most cumulative listening time. */
+  mostListenedAlbum: { title: string; artist: string | null; listenedSec: number } | null;
+
+  /** Longest single session duration — already in StatsOverview but
+   *  duplicated here so the fun-fact builder has everything it needs
+   *  from one IPC call. Same value. */
+  longestSessionSec: number;
+
+  /** Earliest + latest calendar dates of any play. */
+  firstPlayDate: string | null;  // YYYY-MM-DD
+  lastPlayDate: string | null;
+
+  /** How many distinct calendar months have at least one play. */
+  activeMonthCount: number;
+
+  /** Total distinct listening years. */
+  activeYearCount: number;
 }
 
 export type TrackSort = 'title' | 'artist' | 'album' | 'year' | 'genre' | 'duration' | 'date_added' | 'track_no';

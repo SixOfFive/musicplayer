@@ -75,11 +75,13 @@ export default function SuggestedView() {
     setErr(null);
     setVisible(PAGE);
     try {
-      // Fetch up to MAX (500) in a single call — the scorer has to
-      // walk every track in the library anyway to compute the ranking,
-      // so paging at the IPC layer would just do the same work twice.
-      // At ~250 bytes per entry this is ~125KB over IPC, negligible.
-      const r: SuggestionEntry[] = await (window.mp as any).suggestions.get(MAX);
+      // Pass a fresh seed so the main-process scorer applies jitter
+      // + artist/album diversification — every Refresh click produces
+      // a visibly different order, not the same deterministic top-500.
+      // Date.now() is plenty entropy for this and doesn't require any
+      // crypto imports.
+      const seed = Date.now() & 0x7fffffff;
+      const r: SuggestionEntry[] = await (window.mp as any).suggestions.get(MAX, seed);
       setItems(r);
     } catch (e: any) {
       setErr(e?.message ?? String(e));
@@ -133,9 +135,9 @@ export default function SuggestedView() {
           <h1 className="text-3xl font-bold">Suggested for you</h1>
           <p className="text-text-muted text-sm mt-1">
             {items && items.length > 0 ? (
-              <>Showing <span className="text-text-primary">{Math.min(visible, items.length)}</span> of {items.length} ranked picks. Scroll for more.</>
+              <>Showing <span className="text-text-primary">{Math.min(visible, items.length)}</span> of {items.length} ranked picks — excluding tracks you've already liked. Scroll for more.</>
             ) : (
-              <>Top {MAX} tracks ranked by what you've played, liked, and the genres / artists / years you lean toward. Pure local scoring — nothing leaves your machine.</>
+              <>Top {MAX} tracks ranked by what you've played, liked, and the genres / artists / years you lean toward. Already-liked tracks are excluded so the list stays discovery-focused. Pure local scoring — nothing leaves your machine.</>
             )}
           </p>
         </div>
@@ -160,8 +162,10 @@ export default function SuggestedView() {
 
       {items && items.length === 0 && !err && (
         <div className="text-text-muted text-sm">
-          Not enough listening history yet. Play some tracks and like what you
-          enjoy — suggestions sharpen as you listen.
+          Nothing new to suggest right now. Either your listening history is
+          too thin to score from, or every track close to your taste profile
+          is already liked. Play a few unfamiliar tracks and come back —
+          suggestions sharpen as you explore.
         </div>
       )}
 

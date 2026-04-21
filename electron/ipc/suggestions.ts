@@ -98,6 +98,34 @@ const FAMILIAR_SCALE = 0.3;
 // random floor noise when the user's history is thin.
 const MIN_SCORE = 0.01;
 
+// How much score jitter to apply when the caller provides a seed
+// (i.e., when the user explicitly hit Refresh). ±15% of the raw
+// final score — enough to reshuffle tracks with similar affinities,
+// not so much that actual favourites stop surfacing at the top.
+// Result: every refresh produces a genuinely different order, with
+// the same overall "these are your picks" quality bar.
+const JITTER_MAGNITUDE = 0.15;
+
+// How much to penalise subsequent picks by the same artist / album.
+// Applied as a multiplicative decay on score for each same-artist
+// track already chosen. Encourages the top-100 to feel like a mix
+// rather than a single-artist marathon.
+const ARTIST_REPEAT_DECAY = 0.85;
+const ALBUM_REPEAT_DECAY  = 0.90;
+
+/** Seeded PRNG — linear congruential, deterministic given `seed`.
+ *  Returns values in [0, 1). Used to drive the refresh-time jitter
+ *  so a given seed always produces the same "shuffle" — handy for
+ *  debugging, and means successive renders within one refresh hit
+ *  the same scored order. */
+function seededRand(seed: number): () => number {
+  let s = (seed >>> 0) || 1;
+  return () => {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    return s / 0x100000000;
+  };
+}
+
 interface HistoryRow {
   id: number;
   artist_id: number | null;
@@ -115,7 +143,14 @@ interface HistoryRow {
  * candidate, and returns the top-N enriched with artist/album/cover
  * for direct consumption by the renderer's view layer.
  */
-function computeSuggestions(limit: number = 100): SuggestionEntry[] {
+/**
+ * @param limit How many suggestions to return (clamped 1-500).
+ * @param seed Optional PRNG seed. When provided, scores get ±JITTER_MAGNITUDE
+ *   noise and picks get artist/album-repeat decay, so every refresh
+ *   produces a genuinely different ordering. Omit for deterministic
+ *   scoring (handy for testing).
+ */
+function computeSuggestions(limit: number = 100, seed: number | null = null): SuggestionEntry[] {
   const db = getDb();
   const now = Date.now();
 
@@ -237,14 +272,31 @@ function computeSuggestions(limit: number = 100): SuggestionEntry[] {
   const yearScoreNorm  = (y: number | null) => LIKED_BLEND * likedYearScore(y)   + PLAYED_BLEND * playedYearScore(y);
 
   // --- Phase 3: score each candidate ---------------------------------------
+  // If the caller passed a seed (user hit Refresh), we apply a ±15%
+  // multiplicative jitter per track so that tracks with similar raw
+  // scores re-order on each refresh. The PRNG is deterministic given
+  // the seed, so a single request produces stable ordering across
+  // any internal re-reads.
+  const rand = seed != null ? seededRand(seed) : null;
+
   interface Scored {
     id: number;
+    artist_id: number | null;
+    album_id: number | null;
     score: number;
     reason: SuggestionEntry['reason'];
   }
   const scored: Scored[] = [];
 
   for (const r of rows) {
+    // Skip tracks the user has already liked. "Suggested" is a
+    // discovery surface — a liked track is, by definition, something
+    // they already know they enjoy. Those still contribute to the
+    // TASTE PROFILE above (Phase 1) where they're the strongest
+    // positive signal for artist/genre/era weights; they just don't
+    // compete for slots in the output list.
+    if (r.liked) continue;
+
     const aS = artistScoreFor(r.artist_id);
     const gS = genreScoreFor(r.genre);
     const alS = albumScoreFor(r.album_id);
@@ -268,6 +320,15 @@ function computeSuggestions(limit: number = 100): SuggestionEntry[] {
     // one; give room for discovery.
     if (r.liked && r.plays > FAMILIAR_PLAY_THRESHOLD) score *= FAMILIAR_SCALE;
 
+    // Refresh jitter: ±JITTER_MAGNITUDE of the raw score. Applied
+    // multiplicatively so high-score tracks still beat low-score tracks,
+    // but tracks within the same affinity band re-order unpredictably.
+    // Only kicks in when a seed is provided (user-initiated refresh).
+    if (rand) {
+      const jitter = 1 + (rand() * 2 - 1) * JITTER_MAGNITUDE;
+      score *= jitter;
+    }
+
     if (score < MIN_SCORE) continue;
 
     // Reason chip: whichever weighted component contributed the most.
@@ -282,12 +343,46 @@ function computeSuggestions(limit: number = 100): SuggestionEntry[] {
     contribs.sort((a, b) => b[1] - a[1]);
     const reason = contribs[0][0];
 
-    scored.push({ id: r.id, score, reason });
+    scored.push({ id: r.id, artist_id: r.artist_id, album_id: r.album_id, score, reason });
   }
 
-  // --- Phase 4: take top N + enrich for the UI -----------------------------
+  // --- Phase 4: pick top N with diversification -----------------------------
+  // Initial sort by jittered score. Then, when a seed is provided, walk
+  // the list and apply a multiplicative decay to same-artist / same-album
+  // tracks each time we pick one. This means the top-100 doesn't turn into
+  // "25 tracks from one artist in a row" — variety wins ties. Without a
+  // seed (no refresh request) we skip diversification so the deterministic
+  // view stays predictable.
   scored.sort((a, b) => b.score - a.score);
-  const top = scored.slice(0, limit);
+  let top: Scored[];
+  if (rand) {
+    top = [];
+    const artistSeen = new Map<number, number>();
+    const albumSeen = new Map<number, number>();
+    const pool = [...scored];
+    while (top.length < limit && pool.length > 0) {
+      // Apply per-pick decay in-place: each candidate's effective score
+      // equals its base score × ARTIST_REPEAT_DECAY^(times artist picked)
+      // × ALBUM_REPEAT_DECAY^(times album picked). Recompute and pick
+      // the current max on every iteration — a cheap O(pool × picks)
+      // loop for a limit of 500 and pool size in the low thousands.
+      let bestIdx = 0;
+      let bestEff = -Infinity;
+      for (let i = 0; i < pool.length; i++) {
+        const c = pool[i];
+        const aSeen = c.artist_id !== null ? (artistSeen.get(c.artist_id) ?? 0) : 0;
+        const lSeen = c.album_id  !== null ? (albumSeen.get(c.album_id) ?? 0) : 0;
+        const eff = c.score * Math.pow(ARTIST_REPEAT_DECAY, aSeen) * Math.pow(ALBUM_REPEAT_DECAY, lSeen);
+        if (eff > bestEff) { bestEff = eff; bestIdx = i; }
+      }
+      const picked = pool.splice(bestIdx, 1)[0];
+      top.push(picked);
+      if (picked.artist_id !== null) artistSeen.set(picked.artist_id, (artistSeen.get(picked.artist_id) ?? 0) + 1);
+      if (picked.album_id !== null) albumSeen.set(picked.album_id, (albumSeen.get(picked.album_id) ?? 0) + 1);
+    }
+  } else {
+    top = scored.slice(0, limit);
+  }
   if (top.length === 0) return [];
 
   // One batch fetch for display fields + reason details.
@@ -347,9 +442,11 @@ function computeSuggestions(limit: number = 100): SuggestionEntry[] {
 }
 
 export function registerSuggestionsIpc(ipcMain: IpcMain): void {
-  ipcMain.handle(IPC.SUGGESTIONS_GET, (_e, limit?: number) => {
+  ipcMain.handle(IPC.SUGGESTIONS_GET, (_e, limit?: number, seed?: number) => {
     try {
-      return computeSuggestions(typeof limit === 'number' && limit > 0 ? Math.min(500, limit) : 100);
+      const n = typeof limit === 'number' && limit > 0 ? Math.min(500, limit) : 100;
+      const s = typeof seed === 'number' && Number.isFinite(seed) ? seed : null;
+      return computeSuggestions(n, s);
     } catch (err: any) {
       process.stdout.write(`[suggestions] compute failed: ${err?.message ?? err}\n`);
       return [];
