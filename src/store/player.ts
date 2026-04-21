@@ -548,7 +548,30 @@ export const usePlayer = create<PlayerState>((set, get) => {
 
     async prev() {
       const s = get();
-      if (engine.element.currentTime > 3) { engine.seek(0); return; }
+      // "If we're more than 3 seconds into the track, rewind to the start;
+      // otherwise go to the previous track in the queue." This is the
+      // standard music-player ⏮ behaviour.
+      //
+      // When casting, we MUST read the position from store state (which the
+      // cast-status subscriber below keeps synced with the actual device)
+      // and route the rewind through cast.seek — NOT `engine.seek(0)`.
+      // The local <audio> element is paused and its currentTime is a stale
+      // left-over from before the cast handoff; seeking it is a no-op that
+      // the user sees as "rewind broke, speaker kept going."
+      const casting = !!useCast.getState().activeDeviceId;
+      const currentPos = casting ? s.position : engine.element.currentTime;
+      if (currentPos > 3) {
+        if (casting) {
+          set({ position: 0 });
+          lastUserCastSeekAt = Date.now();
+          (window.mp as any).cast.seek(0).catch((err: any) => {
+            console.warn(`[player] prev→cast.seek(0) rejected: ${err?.message ?? err}`);
+          });
+        } else {
+          engine.seek(0);
+        }
+        return;
+      }
       flushAccounting(accountingDurationSec ? accountedSec / accountingDurationSec > 0.5 : false);
       if (s.queue.length === 0) return;
       let ni = s.index - 1;

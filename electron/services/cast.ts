@@ -233,7 +233,14 @@ interface RawCastDevice {
   resume(cb?: (err: any) => void): void;
   stop(cb?: (err: any) => void): void;
   setVolume(level: number, cb?: (err: any) => void): void;
-  seek(seconds: number, cb?: (err: any) => void): void;
+  /**
+   * NOTE: chromecast-api's `seek(seconds)` is RELATIVE — it reads the
+   * current position and calls seekTo(now + seconds). `seekTo(seconds)`
+   * is the absolute-position version. We always want absolute so the
+   * scrubber's clicked value maps directly to playback position.
+   */
+  seek(deltaSeconds: number, cb?: (err: any) => void): void;
+  seekTo(absoluteSeconds: number, cb?: (err: any) => void): void;
   close(): void;
   on(event: string, handler: (...args: any[]) => void): void;
   // Not in every version of chromecast-api's typings, but present on
@@ -399,27 +406,70 @@ export async function castPlay(deviceId: string, filePath: string, meta?: { titl
   });
 }
 
-/** Seek the active Cast device to `seconds` into the current track. */
+/**
+ * Wrap a chromecast-api device callback in a promise that ALWAYS resolves.
+ * These operations can throw synchronously (the underlying castv2-client
+ * blows up with "Cannot read properties of undefined (reading
+ * 'mediaSessionId')" when the receiver has dropped the media session mid-
+ * playback — typically after a long pause, a seek the receiver rejects,
+ * or the device entering idle). Propagating those up to the IPC layer
+ * makes the renderer see "Error invoking remote method..." which looks
+ * to the user like the whole player died. Instead: log and swallow, and
+ * let the 1 Hz status poll correct the UI on the next tick.
+ */
+function safeCastOp(label: string, fn: (cb: (err?: any) => void) => void): Promise<void> {
+  return new Promise((resolve) => {
+    try {
+      fn((err?: any) => {
+        if (err) {
+          process.stdout.write(`[cast] ${label} callback error: ${err?.message ?? err}\n`);
+        }
+        resolve();
+      });
+    } catch (err: any) {
+      // Synchronous throw inside chromecast-api's _tryJoin — session dropped
+      // or never existed. Log with enough detail to diagnose but don't
+      // crash the IPC handler.
+      process.stdout.write(`[cast] ${label} sync throw: ${err?.message ?? err}\n`);
+      resolve();
+    }
+  });
+}
+
+/**
+ * Seek the active Cast device to `seconds` into the current track.
+ *
+ * IMPORTANT: we call `d.seekTo(t)` (absolute), NOT `d.seek(t)`. The
+ * chromecast-api method named `seek` is a RELATIVE jump — it adds the
+ * argument to the current position. Using it here caused "rewind to
+ * specific point" to land wildly wrong (e.g. clicking scrubber at 86s
+ * while the track was at 239s jumped to 325s, past the end, leaving the
+ * receiver idle). `seekTo` is what every other media framework calls
+ * "seek", hence our store-level API is named `seek` as well.
+ */
 export function castSeek(seconds: number): Promise<void> {
   if (!activeDeviceKey) return Promise.resolve();
   const d = devicesByKey.get(activeDeviceKey);
   if (!d) return Promise.resolve();
   const t = Math.max(0, Math.floor(seconds));
-  return new Promise((resolve) => d.seek(t, () => resolve()));
+  process.stdout.write(`[cast] seekTo → ${t}s\n`);
+  return safeCastOp(`seekTo(${t})`, (cb) => d.seekTo(t, cb));
 }
 
 export function castPause(): Promise<void> {
   if (!activeDeviceKey) return Promise.resolve();
   const d = devicesByKey.get(activeDeviceKey);
   if (!d) return Promise.resolve();
-  return new Promise((resolve) => d.pause(() => resolve()));
+  process.stdout.write(`[cast] pause\n`);
+  return safeCastOp('pause', (cb) => d.pause(cb));
 }
 
 export function castResume(): Promise<void> {
   if (!activeDeviceKey) return Promise.resolve();
   const d = devicesByKey.get(activeDeviceKey);
   if (!d) return Promise.resolve();
-  return new Promise((resolve) => d.resume(() => resolve()));
+  process.stdout.write(`[cast] resume\n`);
+  return safeCastOp('resume', (cb) => d.resume(cb));
 }
 
 export function castSetVolume(level: number): Promise<void> {
@@ -427,7 +477,7 @@ export function castSetVolume(level: number): Promise<void> {
   const d = devicesByKey.get(activeDeviceKey);
   if (!d) return Promise.resolve();
   const clamped = Math.max(0, Math.min(1, level));
-  return new Promise((resolve) => d.setVolume(clamped, () => resolve()));
+  return safeCastOp(`setVolume(${clamped.toFixed(2)})`, (cb) => d.setVolume(clamped, cb));
 }
 
 export async function castStop(): Promise<void> {

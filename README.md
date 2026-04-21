@@ -217,6 +217,12 @@ npm run electron:build      # produces platform installer via electron-builder
 - Volume persists across sessions
 - Back/Forward buttons in TopBar track a proper history stack; scroll position restored per page so Back returns you to exactly where you left off
 
+### Audio output routing
+- **Speaker icon next to the volume slider** opens an output-device picker with every local sink the OS exposes (`setSinkId` against `navigator.mediaDevices.enumerateDevices`) and every Google Cast target on the LAN.
+- **Local devices**: System default + every named playback device (Bluetooth headphones, USB DACs, specific HDMI outputs). Selection persists across restarts and falls back to System default if the previously-chosen device has been unplugged.
+- **Google Cast / Nest / Chromecast**: devices are discovered via mDNS and listed in the same dropdown. Picking one pauses the local audio element and streams the currently-playing track to the receiver through a token-protected HTTP server on a random port. Play/pause, scrubber, and volume slider all proxy to the Cast device; the scrubber syncs with the device at 1 Hz. Switching back to a local device stops the cast session cleanly.
+- **CGNAT-aware LAN IP picking**: the Cast media server advertises the first RFC1918 address (192.168 / 10 / 172.16-31), deprioritizing Tailscale's 100.64/10 range and link-local so speakers always receive a reachable URL even when Tailscale is running.
+
 ### Playlists (universal .m3u8 format)
 - **Left-sidebar "Playlists" tab** → dedicated grid view with Export-all / Import-from-folder buttons
 - **Auto-export on every edit** — creating, renaming, adding/removing/reordering tracks, and liking/unliking all write a `.m3u8` immediately
@@ -350,6 +356,10 @@ electron/                   Main process
     metadata-providers.ts   MB / CAA / Deezer with throttling
     ffmpeg.ts               Wraps ffmpeg-static for MP3 conversion
     playlist-export.ts      M3U8 write / parse / import orchestrator
+    fs-fallback.ts          statWithFallback — SMB trailing-dot / case-drift recovery
+    image-cache.ts          LRU thumbnail cache + on-disk persistence across restarts
+    cast.ts                 mDNS discovery, token-protected HTTP media server, Cast
+                            transport (play/pause/seekTo/volume) + 1 Hz status poll
   ipc/
     library.ts              tracks / albums / artists / stats / delete / artist detail
     scan.ts                 Recursive walk + tag parse + background art fetch
@@ -359,6 +369,8 @@ electron/                   Main process
     stats.ts                Play events + overview aggregations
     settings.ts             get/set
     visualizer.ts           Plugin discovery (built-in + bundled Milkdrop + user dirs)
+    cast.ts                 Cast IPC bridge (list / play / pause / resume / stop /
+                            setVolume / seek / onStatus)
 shared/
   types.ts                  Shared TS types + IPC channel names
 src/
@@ -368,12 +380,12 @@ src/
     host.ts                 Canvas lifecycle + rAF loop
     backends/builtin.ts     Canvas2D built-ins
     backends/milkdrop.ts    butterchurn wrapper
-  store/                    Zustand (player, library)
+  store/                    Zustand (player, library, convert, cast)
   hooks/                    useScanProgress, useLibraryRefresh
   lib/mediaUrl.ts           Build mp-media:// URLs
   components/               Sidebar, TopBar, NowPlayingBar, TrackRow, AlbumCard,
                             FirstRun, SortHeader, ScanProgressPanel, ArtStatusStrip,
-                            LibraryStatsPanel, ShrinkAlbumButton
+                            LibraryStatsPanel, ShrinkAlbumButton, OutputDevicePicker
   views/                    Home, Library, Albums, Album (detail), Artists,
                             Artist (detail), Playlist, Playlists, Visualizer,
                             Settings/*
