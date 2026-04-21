@@ -269,6 +269,17 @@ export const IPC = {
   LIBRARY_LARGEST_ALBUMS: 'library:largest-albums',
   LIBRARY_MIGRATE_COVER_ART: 'library:migrate-cover-art',
   LIBRARY_REVEAL_IN_FOLDER: 'library:reveal-in-folder',
+  // Google Cast (Chromecast / Nest Mini). Main process owns discovery,
+  // the media server, and device control; renderer only orchestrates.
+  CAST_LIST: 'cast:list',
+  CAST_PLAY: 'cast:play',
+  CAST_PAUSE: 'cast:pause',
+  CAST_RESUME: 'cast:resume',
+  CAST_STOP: 'cast:stop',
+  CAST_SET_VOLUME: 'cast:set-volume',
+  CAST_ACTIVE: 'cast:active',
+  CAST_SEEK: 'cast:seek',
+  CAST_STATUS: 'cast:status', // main → renderer push
   // Playback helpers
   PLAYBACK_FILE_URL: 'playback:file-url',
   // Visualizer plugins
@@ -548,6 +559,13 @@ export interface SearchResults {
   tracks: SearchTrackHit[];
   albums: SearchAlbumHit[];
   artists: SearchArtistHit[];
+}
+
+export interface CastDeviceRef {
+  id: string;
+  name: string;
+  host: string;
+  type: 'chromecast' | 'nest' | 'unknown';
 }
 
 export interface LargestAlbum {

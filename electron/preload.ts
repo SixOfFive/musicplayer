@@ -115,6 +115,23 @@ const api = {
       return () => ipcRenderer.removeListener(IPC.RADIO_NOW_PLAYING, listener);
     },
   },
+  cast: {
+    list: () => ipcRenderer.invoke(IPC.CAST_LIST),
+    play: (deviceId: string, filePath: string, meta?: unknown) => ipcRenderer.invoke(IPC.CAST_PLAY, deviceId, filePath, meta),
+    pause: () => ipcRenderer.invoke(IPC.CAST_PAUSE),
+    resume: () => ipcRenderer.invoke(IPC.CAST_RESUME),
+    stop: () => ipcRenderer.invoke(IPC.CAST_STOP),
+    setVolume: (level: number) => ipcRenderer.invoke(IPC.CAST_SET_VOLUME, level),
+    seek: (seconds: number) => ipcRenderer.invoke(IPC.CAST_SEEK, seconds),
+    active: () => ipcRenderer.invoke(IPC.CAST_ACTIVE),
+    // Main pushes cast status (currentTime/duration/playerState) via
+    // this event whenever the active device sends a new status frame.
+    onStatus: (cb: (payload: { currentTime: number; duration: number | null; playerState: string; deviceId: string }) => void) => {
+      const listener = (_: unknown, p: any) => cb(p);
+      ipcRenderer.on(IPC.CAST_STATUS, listener);
+      return () => ipcRenderer.removeListener(IPC.CAST_STATUS, listener);
+    },
+  },
   convert: {
     checkAvailable: () => ipcRenderer.invoke(IPC.CONVERT_CHECK_AVAILABLE),
     albumToMp3: (albumId: number) => ipcRenderer.invoke(IPC.CONVERT_ALBUM_TO_MP3, albumId),

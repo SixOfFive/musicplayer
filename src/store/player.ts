@@ -1,5 +1,17 @@
 import { create } from 'zustand';
 import { getAudioEngine } from '../audio/AudioEngine';
+import { useCast } from './cast';
+
+/**
+ * Timestamp of the most recent user-initiated Cast seek. The status
+ * subscriber below ignores the `currentTime` field for a grace window
+ * after this so the device's pre-seek position doesn't tug-of-war
+ * with the UI's optimistic update. Module-scope so both the `seek`
+ * action inside the store closure and the out-of-store subscriber
+ * can read/write it.
+ */
+let lastUserCastSeekAt = 0;
+const CAST_SEEK_GRACE_MS = 2500; // covers the device's typical seek-to-play settle time
 
 interface QueueItem {
   id: number;
@@ -189,6 +201,32 @@ export const usePlayer = create<PlayerState>((set, get) => {
   }
 
   async function loadAndPlay(cur: QueueItem) {
+    // If a Cast device is active, route this track to it instead of
+    // starting local playback. The <audio> element stays paused so we
+    // don't double-play through the laptop speakers + the cast target.
+    const castId = useCast.getState().activeDeviceId;
+    if (castId) {
+      // Pause local in case a previous track was still on it.
+      try { engine.pause(); } catch { /* noop */ }
+      if (typeof cur.durationSec === 'number' && cur.durationSec > 0) {
+        set({ duration: cur.durationSec, isPlaying: true });
+      } else {
+        set({ duration: 0, isPlaying: true });
+      }
+      startAccounting(cur.id, cur.durationSec, cur.artist, cur.title, cur.album);
+      try {
+        await (window.mp as any).cast.play(castId, cur.path, {
+          title: cur.title,
+          artist: cur.artist ?? undefined,
+          album: cur.album ?? undefined,
+        });
+      } catch (err: any) {
+        console.error(`[player] cast.play failed: ${err?.message ?? err}`);
+        set({ isPlaying: false });
+      }
+      return;
+    }
+
     const url = await makeUrl(cur.path);
     // Local files go through our mp-media:// protocol which supports CORS.
     // Setting crossOrigin before src is required for the MediaElementSource
@@ -452,6 +490,22 @@ export const usePlayer = create<PlayerState>((set, get) => {
     },
 
     toggle() {
+      // When a Cast device is active, transport proxies to it — local
+      // <audio> element is paused and doesn't know the true play state.
+      // Use the store's isPlaying as the truth.
+      const castId = useCast.getState().activeDeviceId;
+      if (castId) {
+        const s = get();
+        if (s.isPlaying) {
+          void (window.mp as any).cast.pause();
+          set({ isPlaying: false });
+        } else {
+          void (window.mp as any).cast.resume();
+          set({ isPlaying: true });
+        }
+        return;
+      }
+
       // Self-heal: if the element is in error state (file deleted out from
       // under us by Shrink / Rescan, decode error, network blip on an HLS
       // stream), a plain `play()` here will reject with the same error —
@@ -507,6 +561,38 @@ export const usePlayer = create<PlayerState>((set, get) => {
     },
 
     seek(sec) {
+      // When casting, route the seek to the Cast device. The local
+      // <audio> element's currentTime is irrelevant (it's paused and
+      // never decoded the track in the first place), so setting it
+      // does nothing useful.
+      //
+      // Two things to get right here, or the scrubber fights the user:
+      //
+      //   1. OPTIMISTIC UI. Set the scrubber to the target immediately.
+      //      The device acts on the seek command in ~300-800ms; during
+      //      that window the status poll keeps reporting the PRE-seek
+      //      position. Without suppression the scrubber snaps back to
+      //      the old spot, the user thinks the click did nothing, and
+      //      clicks again — classic tug-of-war. The status subscriber
+      //      below checks `lastUserCastSeekAt` and ignores incoming
+      //      positions for a grace window after a user-initiated seek.
+      //
+      //   2. STATE FILTERING. Cast receivers briefly pass through
+      //      BUFFERING (and sometimes IDLE) right after a seek. If we
+      //      naively mirror those into isPlaying=false the UI shows
+      //      "paused" until the next poll cycle and the user thinks
+      //      the track stopped. The subscriber filters to only
+      //      PLAYING/PAUSED — the only two states that actually
+      //      correspond to a user-visible intent.
+      if (useCast.getState().activeDeviceId) {
+        set({ position: sec });
+        lastUserCastSeekAt = Date.now();
+        (window.mp as any).cast.seek(sec).catch((err: any) => {
+          console.warn(`[player] cast.seek(${sec}) rejected: ${err?.message ?? err}`);
+        });
+        return;
+      }
+
       // Same self-heal as toggle(): if the element is in error state, setting
       // currentTime is a no-op and the scrubber locks at 0. Reload the
       // current track first, then jump to the requested position once the
@@ -527,7 +613,18 @@ export const usePlayer = create<PlayerState>((set, get) => {
       }
       engine.seek(sec);
     },
-    setVolume(v) { engine.setVolume(v); set({ volume: v }); scheduleVolumeSave(v); },
+    setVolume(v) {
+      engine.setVolume(v);
+      set({ volume: v });
+      scheduleVolumeSave(v);
+      // Mirror to the active Cast device so the same slider controls
+      // whatever's actually making sound. Cast device runs its own
+      // hardware volume; we push the 0..1 normalised value and it
+      // scales to its own range.
+      if (useCast.getState().activeDeviceId) {
+        void (window.mp as any).cast.setVolume(v);
+      }
+    },
     setLikedIds(ids) { set({ likedIds: new Set(ids) }); },
     async toggleLike(trackId) {
       const liked = await window.mp.likes.toggle(trackId);
@@ -590,3 +687,55 @@ export const usePlayer = create<PlayerState>((set, get) => {
     },
   };
 });
+
+// --- Cast status → player state bridge ---------------------------------------
+// When a Cast device is active, the local <audio> element is paused and
+// therefore never fires timeupdate / loadedmetadata / play / pause events.
+// The NowPlayingBar's scrubber and play/pause icon normally read from
+// those events; without a bridge, they'd freeze at whatever values they
+// had when casting started.
+//
+// Fix: the cast store holds `lastStatus`, which is set by an IPC
+// subscription against the main-process `cast:status` event (fired
+// ~1 Hz by the active device). Here we subscribe to changes on that
+// slice and mirror the useful fields into player state. Zustand's
+// `subscribe` gives us a clean top-of-module place to do it without
+// importing usePlayer from the cast store (which would be a circular
+// import; cast is imported by player, not the other way around).
+useCast.subscribe((cast) => {
+  const s = cast.lastStatus;
+  if (!s) return;
+  // Ignore stragglers from a device we've since switched away from.
+  if (cast.activeDeviceId !== s.deviceId) return;
+
+  const patch: Partial<{ position: number; duration: number; isPlaying: boolean }> = {};
+
+  // --- Position mirroring with post-seek grace window ----------------------
+  // Right after the user clicks/drags the scrubber, the device needs
+  // ~300-800ms to act on the seek command. During that window the poll
+  // keeps reporting the PRE-seek position and — without this guard — the
+  // scrubber snaps back to where it was, making it feel like the click
+  // did nothing. Suppress position updates for CAST_SEEK_GRACE_MS after
+  // the user's most recent seek; duration/playerState still update normally.
+  const withinSeekGrace = Date.now() - lastUserCastSeekAt < CAST_SEEK_GRACE_MS;
+  if (!withinSeekGrace && Number.isFinite(s.currentTime)) {
+    patch.position = s.currentTime;
+  }
+
+  if (typeof s.duration === 'number' && s.duration > 0) patch.duration = s.duration;
+
+  // --- isPlaying filtering -------------------------------------------------
+  // Only PLAYING and PAUSED represent stable user-visible states. BUFFERING
+  // and IDLE are transients the receiver passes through during:
+  //   - initial media load (briefly IDLE → BUFFERING → PLAYING)
+  //   - every seek (briefly BUFFERING)
+  //   - between tracks (briefly IDLE before the next load fires)
+  // Mirroring those into isPlaying makes the play/pause icon blink and
+  // the user thinks playback stopped. Ignore them — the next PLAYING
+  // or PAUSED tick will correct the UI if needed.
+  if (s.playerState === 'PLAYING') patch.isPlaying = true;
+  else if (s.playerState === 'PAUSED') patch.isPlaying = false;
+
+  if (Object.keys(patch).length > 0) usePlayer.setState(patch as any);
+});
+

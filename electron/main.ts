@@ -17,6 +17,7 @@ import { registerConvertIpc } from './ipc/convert';
 import { registerUpdateIpc } from './ipc/update';
 import { registerRadioIpc } from './ipc/radio';
 import { registerLastFmIpc } from './ipc/lastfm';
+import { registerCastIpc } from './ipc/cast';
 import { setAutoUpdaterWindow } from './services/updater';
 import { importPlaylistsFromFolder } from './services/playlist-export';
 import { initDatabase } from './services/db';
@@ -445,6 +446,7 @@ app.whenReady().then(async () => {
   registerUpdateIpc(ipcMain);
   registerRadioIpc(ipcMain, () => mainWindow);
   registerLastFmIpc(ipcMain);
+  registerCastIpc(ipcMain, () => mainWindow);
   setAutoUpdaterWindow(() => mainWindow);
 
   // Debug: toggle DevTools on demand (used by Settings → About & Updates).
