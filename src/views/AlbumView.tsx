@@ -91,6 +91,7 @@ export default function AlbumView() {
   }
 
   if (loading && !album) return <section className="p-8 text-text-muted">Loading…</section>;
+
   if (notFound || !album) {
     return (
       <section className="p-8">
@@ -120,6 +121,11 @@ export default function AlbumView() {
   }
 
   const totalSec = tracks.reduce((n, t) => n + (t.duration_sec ?? 0), 0);
+  // Total album size across all tracks — surfaced in the header next to
+  // track count / runtime so users can tell "big lossless album" vs
+  // "compact mp3 album" at a glance. RowTrack.size is optional (not every
+  // caller populates it), so we guard the sum against missing values.
+  const totalBytes = tracks.reduce((n, t: any) => n + (t.size ?? 0), 0);
 
   // Path shown on hover and opened on click when the user clicks the
   // album art. Prefer the album's FOLDER (derived from a track) over
@@ -163,6 +169,7 @@ export default function AlbumView() {
             {album.year ? <> · {album.year}</> : null}
             {album.genre ? <> · {album.genre}</> : null}
             {' · '}{tracks.length} tracks · {Math.floor(totalSec / 60)} min
+            {totalBytes > 0 ? ` · ${formatBytes(totalBytes)}` : ''}
           </div>
         </div>
         <MiniVisualizer className="hidden md:block w-64 h-36 flex-shrink-0 self-end" />
