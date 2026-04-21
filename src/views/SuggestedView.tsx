@@ -13,10 +13,20 @@
 // ourselves and call play() directly; a future refactor could unify
 // this with TrackRow via a "extraColumns" prop.
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { usePlayer } from '../store/player';
 import { mediaUrl } from '../lib/mediaUrl';
 import type { SuggestionEntry } from '../../shared/types';
+
+// How many rows appear on first render, and how many more we reveal
+// each time the user scrolls near the bottom. Paging by 100 keeps the
+// rendered DOM small on small libraries (where 500 suggestions would
+// be overkill anyway) and gives a clean progressive feel on large ones.
+const PAGE = 100;
+// Hard cap — the scoring engine can rank more, but there's no real
+// value in browsing past 500 for a "suggested" list. Anything deeper
+// is tail-noise.
+const MAX = 500;
 
 function fmtDur(sec: number | null): string {
   if (!sec || sec <= 0) return '—';
@@ -51,14 +61,25 @@ function reasonTint(reason: SuggestionEntry['reason']): string {
 export default function SuggestedView() {
   const [items, setItems] = useState<SuggestionEntry[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // Progressive reveal — start at PAGE (100), grow by PAGE each time
+  // the sentinel below enters the viewport, capped at the fetched
+  // list length. Kept in state so scroll-driven increments re-render.
+  const [visible, setVisible] = useState<number>(PAGE);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+
   const play = usePlayer((s) => s.play);
   const toggleLike = usePlayer((s) => s.toggleLike);
   const likedIds = usePlayer((s) => s.likedIds);
 
   async function refresh() {
     setErr(null);
+    setVisible(PAGE);
     try {
-      const r: SuggestionEntry[] = await (window.mp as any).suggestions.get(100);
+      // Fetch up to MAX (500) in a single call — the scorer has to
+      // walk every track in the library anyway to compute the ranking,
+      // so paging at the IPC layer would just do the same work twice.
+      // At ~250 bytes per entry this is ~125KB over IPC, negligible.
+      const r: SuggestionEntry[] = await (window.mp as any).suggestions.get(MAX);
       setItems(r);
     } catch (e: any) {
       setErr(e?.message ?? String(e));
@@ -66,6 +87,25 @@ export default function SuggestedView() {
   }
 
   useEffect(() => { void refresh(); }, []);
+
+  // Reveal the next 100 when the sentinel (an invisible div after the
+  // last row) scrolls into view. IntersectionObserver is cheaper than
+  // a scroll listener — no layout thrash, no throttling needed.
+  // rootMargin 600px means we start fetching-to-render a bit before
+  // the sentinel is actually visible, so the user doesn't see the
+  // "loading more" flash in the middle of a scroll.
+  useEffect(() => {
+    if (!sentinelRef.current) return;
+    if (!items) return;
+    if (visible >= items.length) return;
+    const el = sentinelRef.current;
+    const io = new IntersectionObserver((entries) => {
+      if (!entries.some((e) => e.isIntersecting)) return;
+      setVisible((v) => Math.min(items.length, v + PAGE));
+    }, { rootMargin: '600px 0px' });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [items, visible]);
 
   function playFrom(i: number) {
     if (!items) return;
@@ -92,9 +132,11 @@ export default function SuggestedView() {
         <div className="flex-1">
           <h1 className="text-3xl font-bold">Suggested for you</h1>
           <p className="text-text-muted text-sm mt-1">
-            Top {items?.length ?? 100} tracks ranked by what you've played,
-            liked, and the genres / artists / years you lean toward. Pure local
-            scoring — nothing leaves your machine.
+            {items && items.length > 0 ? (
+              <>Showing <span className="text-text-primary">{Math.min(visible, items.length)}</span> of {items.length} ranked picks. Scroll for more.</>
+            ) : (
+              <>Top {MAX} tracks ranked by what you've played, liked, and the genres / artists / years you lean toward. Pure local scoring — nothing leaves your machine.</>
+            )}
           </p>
         </div>
         <button
@@ -124,8 +166,9 @@ export default function SuggestedView() {
       )}
 
       {items && items.length > 0 && (
+        <>
         <div className="space-y-1">
-          {items.map((e, i) => {
+          {items.slice(0, visible).map((e, i) => {
             const liked = likedIds.has(e.id);
             return (
               <div
@@ -170,6 +213,31 @@ export default function SuggestedView() {
             );
           })}
         </div>
+
+        {/* Sentinel that triggers the next +100 reveal when it enters
+            the viewport. Skipped once we've revealed everything —
+            IntersectionObserver in the useEffect above also bails in
+            that case, so the rAF churn stops naturally. */}
+        {visible < items.length && (
+          <>
+            <div ref={sentinelRef} className="h-1" aria-hidden />
+            <div className="text-center py-4 text-text-muted text-xs">
+              Loading more suggestions…
+            </div>
+          </>
+        )}
+
+        {/* End-of-list label — tells the user they've seen everything
+            and makes the truncation at MAX feel deliberate rather than
+            broken. */}
+        {visible >= items.length && (
+          <div className="text-center py-6 text-text-muted text-xs">
+            {items.length >= MAX
+              ? `That's the top ${MAX}. Lower-scored picks beyond here are noise more than signal.`
+              : `End of list — ${items.length} suggestion${items.length === 1 ? '' : 's'} from your library.`}
+          </div>
+        )}
+        </>
       )}
     </section>
   );

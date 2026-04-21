@@ -9,22 +9,50 @@
 //   - tracks.artist_id / album_id / genre / year  (the attributes we
 //     score similarity against)
 //
-// Four partial scores per candidate track, each normalised to 0..1:
-//   artistMatch  — weight(this.artist_id) / max(weight(any artist))
-//   genreMatch   — weight(this.genre)     / max(weight(any genre))
-//   albumMatch   — weight(this.album_id)  / max(weight(any album))
-//   yearMatch    — sum over liked years of exp(-|dy|/5), normalised
+// TWO-TIER TASTE PROFILE
+// ---------------------------------------------------------------------------
+// Splitting the profile into separate "liked" and "played-only" maps
+// prevents a track you've had on rotation 100 times (but never hit the
+// heart on) from dominating your taste signal. Such a track is usually
+// something that lives in your queue by accident — shuffle luck, radio
+// appearance, album filler — not something you've actually committed
+// to loving. Treating it equal to a like would drag recommendations
+// toward "more of the stuff you kind of tolerate."
 //
-// Final score = 0.40·artist + 0.25·genre + 0.15·album + 0.10·year
+// Two independent profiles:
+//   likedProfile — from tracks in track_likes. A liked track contributes
+//     `(1 + log(1+plays)) × decay`, so play count still boosts, but
+//     the like itself is a strong floor regardless of how often it's
+//     been spun. Liked-but-rarely-played tracks still register.
+//
+//   playedProfile — from tracks with plays > 0 AND NOT liked. Each
+//     contributes `log(1+plays) × decay`. The log keeps 100 plays
+//     from being 100× the signal of 1 play — diminishing returns
+//     match how music listening actually works (your 100th spin of
+//     a song tells me much less than your first 10).
+//
+// Each candidate track gets two scores per attribute (artist / genre /
+// album / year): one against the liked profile, one against the played
+// profile. We then combine them as a 70/30 blend, favouring likes:
+//   combinedArtistMatch = 0.70 × likedArtistMatch + 0.30 × playedArtistMatch
+// The blend tuning is deliberately biased — a user's explicit likes
+// are the clearest signal of "what kind of music I want to hear,"
+// while playcount is a noisy proxy for it. If the user has never liked
+// anything, the liked profile is empty and all weight falls through
+// to played — degrades gracefully to a play-based recommender.
+//
+// FINAL SCORE
+// ---------------------------------------------------------------------------
+// score = 0.40·combinedArtist + 0.25·combinedGenre + 0.15·combinedAlbum + 0.10·combinedYear
 //
 // Then two post-multipliers that push truly-discoverable picks up:
 //   - Recency penalty (played in last 14 days → scaled down).
 //   - Over-familiarity penalty (liked AND played >10 times → halved).
 //
 // The reason chip is the single biggest contributor to the score —
-// whichever of artistMatch/genreMatch/albumMatch/yearMatch×its weight
-// wins. Gives the user a plain-English "why is this here?" label so
-// the list doesn't feel like a black box.
+// whichever of combined-{artist,genre,album,year} × its top-level
+// weight wins. Gives the user a plain-English "why is this here?"
+// label so the list doesn't feel like a black box.
 
 import type { IpcMain } from 'electron';
 import { IPC, type SuggestionEntry } from '../../shared/types';
@@ -47,10 +75,14 @@ const W_GENRE  = 0.25;
 const W_ALBUM  = 0.15;
 const W_YEAR   = 0.10;
 
-// How much a like amplifies a single track's contribution to the
-// taste profile. A liked-but-never-played track still registers; a
-// played-and-liked track dominates over a played-once-not-liked one.
-const LIKE_BOOST = 5;
+// Profile blend: how much the LIKED-tracks taste profile dominates over
+// the PLAYED-only profile when combining partial scores. 0.70 means
+// three-quarters of your taste signal comes from what you've explicitly
+// liked; the rest fills in from what you've played often enough to
+// matter. Tunable — if the list feels too narrowly "more of what you
+// already liked", bump PLAYED_BLEND up a bit for broader strokes.
+const LIKED_BLEND  = 0.70;
+const PLAYED_BLEND = 0.30;
 
 // Recency penalty: tracks played in the last N days get their final
 // score scaled by `(age / N) ^ 0.5`, so a just-played track ≈ 0, a
@@ -107,9 +139,10 @@ function computeSuggestions(limit: number = 100): SuggestionEntry[] {
 
   if (rows.length === 0) return [];
 
-  // --- Phase 1: build the taste profile ------------------------------------
-  // For every track the user has actually touched (played OR liked),
-  // contribute a weight to its artist, genre, album, year buckets.
+  // --- Phase 1: build the two-tier taste profile ---------------------------
+  // Liked profile (strong signal) and played-only profile (secondary)
+  // kept separate so they can be weighted differently when combined.
+  // Each Map keys attribute-value → accumulated weight.
   const decay = (lastMs: number | null): number => {
     if (!lastMs) return 0.5; // liked-but-never-played gets a neutral 0.5
     const days = (now - lastMs) / 86_400_000;
@@ -117,56 +150,91 @@ function computeSuggestions(limit: number = 100): SuggestionEntry[] {
     return Math.exp(-days / HALF_LIFE_DAYS);
   };
 
-  const artistW = new Map<number, number>();
-  const genreW  = new Map<string, number>();
-  const albumW  = new Map<number, number>();
-  const yearW   = new Map<number, number>();
+  const likedArtistW  = new Map<number, number>();
+  const likedGenreW   = new Map<string, number>();
+  const likedAlbumW   = new Map<number, number>();
+  const likedYearW    = new Map<number, number>();
+  const playedArtistW = new Map<number, number>();
+  const playedGenreW  = new Map<string, number>();
+  const playedAlbumW  = new Map<number, number>();
+  const playedYearW   = new Map<number, number>();
 
   for (const r of rows) {
-    // Skip tracks the user has never interacted with — they provide
-    // zero signal to the profile.
     if (r.plays === 0 && !r.liked) continue;
-    const w = (r.plays + (r.liked ? LIKE_BOOST : 0)) * decay(r.last);
-    if (w <= 0) continue;
-    if (r.artist_id !== null) artistW.set(r.artist_id, (artistW.get(r.artist_id) ?? 0) + w);
-    if (r.genre)              genreW.set(r.genre,      (genreW.get(r.genre) ?? 0) + w);
-    if (r.album_id !== null)  albumW.set(r.album_id,   (albumW.get(r.album_id) ?? 0) + w);
-    if (r.year !== null)      yearW.set(r.year,        (yearW.get(r.year) ?? 0) + w);
+    const d = decay(r.last);
+    if (r.liked) {
+      // Liked track: floor of 1 + log-play boost. Even a never-played
+      // like registers as a solid 1×decay; heavily-played liked tracks
+      // climb logarithmically from there (1+ln(51) ≈ 4.9 for 50 plays).
+      const w = (1 + Math.log(1 + r.plays)) * d;
+      if (w <= 0) continue;
+      if (r.artist_id !== null) likedArtistW.set(r.artist_id, (likedArtistW.get(r.artist_id) ?? 0) + w);
+      if (r.genre)              likedGenreW.set(r.genre,       (likedGenreW.get(r.genre) ?? 0) + w);
+      if (r.album_id !== null)  likedAlbumW.set(r.album_id,    (likedAlbumW.get(r.album_id) ?? 0) + w);
+      if (r.year !== null)      likedYearW.set(r.year,         (likedYearW.get(r.year) ?? 0) + w);
+    } else {
+      // Played-not-liked: log(1+plays) × decay. One play ≈ 0.69, ten
+      // plays ≈ 2.4, a hundred plays ≈ 4.6. A heavily-played unliked
+      // track still contributes real signal but can't dominate a liked
+      // track's floor of 1 (weighted at 70% vs 30% in the blend below).
+      const w = Math.log(1 + r.plays) * d;
+      if (w <= 0) continue;
+      if (r.artist_id !== null) playedArtistW.set(r.artist_id, (playedArtistW.get(r.artist_id) ?? 0) + w);
+      if (r.genre)              playedGenreW.set(r.genre,       (playedGenreW.get(r.genre) ?? 0) + w);
+      if (r.album_id !== null)  playedAlbumW.set(r.album_id,    (playedAlbumW.get(r.album_id) ?? 0) + w);
+      if (r.year !== null)      playedYearW.set(r.year,         (playedYearW.get(r.year) ?? 0) + w);
+    }
   }
 
   // If the user has zero history, there's nothing to score from. Bail
   // with an empty list rather than returning a random slice.
-  if (artistW.size === 0 && genreW.size === 0 && albumW.size === 0 && yearW.size === 0) {
-    return [];
-  }
+  const anyProfile =
+    likedArtistW.size + likedGenreW.size + likedAlbumW.size + likedYearW.size +
+    playedArtistW.size + playedGenreW.size + playedAlbumW.size + playedYearW.size;
+  if (anyProfile === 0) return [];
 
-  // --- Phase 2: normaliser helpers -----------------------------------------
-  const maxArtistW = Math.max(0, ...artistW.values());
-  const maxGenreW  = Math.max(0, ...genreW.values());
-  const maxAlbumW  = Math.max(0, ...albumW.values());
-  const artistScoreFor = (id: number | null) => id !== null && maxArtistW > 0 ? (artistW.get(id) ?? 0) / maxArtistW : 0;
-  const genreScoreFor  = (g: string | null)  => g        && maxGenreW  > 0 ? (genreW.get(g) ?? 0)  / maxGenreW  : 0;
-  const albumScoreFor  = (id: number | null) => id !== null && maxAlbumW  > 0 ? (albumW.get(id) ?? 0) / maxAlbumW  : 0;
-
-  // Year: a candidate year scores by summing exp(-|candidate-ky|/sigma)
-  // across every year the user has listened to, weighted by that year's
-  // profile weight. Normalise against the best-possible year (the one
-  // that's exactly on the peak).
-  const yearScoreFor = (y: number | null): number => {
-    if (y === null || yearW.size === 0) return 0;
-    let raw = 0;
-    for (const [ky, w] of yearW) {
-      const dy = Math.abs(ky - y);
-      if (dy > 20) continue;  // years more than 20 apart contribute nothing
-      raw += w * Math.exp(-dy / YEAR_SIGMA);
-    }
-    return raw;
+  // --- Phase 2: per-profile normalisers -----------------------------------
+  // Each profile gets its own max so one empty profile (e.g. no likes
+  // yet) doesn't zero out the other. The combined score below blends.
+  const normMap = <K>(m: Map<K, number>) => {
+    const max = Math.max(0, ...m.values());
+    return (k: K | null): number => (k !== null && max > 0 ? (m.get(k) ?? 0) / max : 0);
   };
-  // Normalise year scores to 0..1 by sampling every year present in the
-  // profile (the maximum possible score is achieved by a track AT one of
-  // those years).
-  const maxYearRaw = Math.max(0, ...[...yearW.keys()].map((y) => yearScoreFor(y)));
-  const yearScoreNorm = (y: number | null) => (maxYearRaw > 0 ? yearScoreFor(y) / maxYearRaw : 0);
+  const likedArtistScore  = normMap(likedArtistW);
+  const likedGenreScore   = normMap(likedGenreW);
+  const likedAlbumScore   = normMap(likedAlbumW);
+  const playedArtistScore = normMap(playedArtistW);
+  const playedGenreScore  = normMap(playedGenreW);
+  const playedAlbumScore  = normMap(playedAlbumW);
+
+  // Year scoring: smoothed across ±20 years using a Gaussian-like bell
+  // with YEAR_SIGMA sigma. Computed per-profile independently so a
+  // user who likes 1970s rock and often plays 2020s pop sees both
+  // contribute to their suggestions.
+  const makeYearScorer = (yearW: Map<number, number>) => {
+    if (yearW.size === 0) return (_y: number | null): number => 0;
+    const rawFor = (y: number): number => {
+      let raw = 0;
+      for (const [ky, w] of yearW) {
+        const dy = Math.abs(ky - y);
+        if (dy > 20) continue;
+        raw += w * Math.exp(-dy / YEAR_SIGMA);
+      }
+      return raw;
+    };
+    const maxRaw = Math.max(0, ...[...yearW.keys()].map(rawFor));
+    return (y: number | null): number => (y === null || maxRaw <= 0 ? 0 : rawFor(y) / maxRaw);
+  };
+  const likedYearScore  = makeYearScorer(likedYearW);
+  const playedYearScore = makeYearScorer(playedYearW);
+
+  // Combined scorers: 70% liked-profile, 30% played-profile. If the
+  // user has never liked anything the liked-side returns 0 and all
+  // weight transparently flows through the played side.
+  const artistScoreFor = (id: number | null) => LIKED_BLEND * likedArtistScore(id) + PLAYED_BLEND * playedArtistScore(id);
+  const genreScoreFor  = (g: string | null) => LIKED_BLEND * likedGenreScore(g)  + PLAYED_BLEND * playedGenreScore(g);
+  const albumScoreFor  = (id: number | null) => LIKED_BLEND * likedAlbumScore(id) + PLAYED_BLEND * playedAlbumScore(id);
+  const yearScoreNorm  = (y: number | null) => LIKED_BLEND * likedYearScore(y)   + PLAYED_BLEND * playedYearScore(y);
 
   // --- Phase 3: score each candidate ---------------------------------------
   interface Scored {
