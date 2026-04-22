@@ -135,16 +135,22 @@ export default function UpdateBanner() {
       {result.latestMessage && (
         <span className="text-text-muted truncate flex-1">— {result.latestMessage}</span>
       )}
+      {/* Local changes are no longer a blocker — the backend auto-stashes
+          them (git stash push -u) before the hard-reset so nothing is lost.
+          A small informational chip lets the user know the stash will happen,
+          but there's no more "commit or stash first" gate. */}
       {!packaged && result.dirtyWorkingTree && (
-        <span className="text-red-300" title="Local edits prevent an auto-update">(local changes present)</span>
+        <span className="text-yellow-300/80" title="Local edits will be stashed automatically before update">
+          (local changes will be stashed)
+        </span>
       )}
       {!applied ? (
         <>
           <button
             onClick={apply}
-            disabled={busy || (!packaged && result.dirtyWorkingTree)}
+            disabled={busy}
             className="px-3 py-1 rounded-full bg-yellow-500 hover:bg-yellow-400 disabled:opacity-50 text-black font-semibold"
-            title={packaged ? 'Download installer and restart' : (result.dirtyWorkingTree ? 'Commit or stash local changes first' : 'Run git pull and restart')}
+            title={packaged ? 'Download installer and restart' : 'Fetch + reset to origin (auto-stashes local changes first)'}
           >{busy ? (packaged ? 'Downloading…' : 'Updating…') : 'Update now'}</button>
           <button
             onClick={() => window.open(result.upstreamUrl, '_blank')}

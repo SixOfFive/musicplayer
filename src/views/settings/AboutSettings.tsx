@@ -132,9 +132,9 @@ export default function AboutSettings() {
                 {!applyResult && (
                   <button
                     onClick={apply}
-                    disabled={applying || check.dirtyWorkingTree}
+                    disabled={applying}
                     className="bg-accent hover:bg-accent-hover disabled:opacity-50 text-black font-semibold px-4 py-1.5 rounded-full inline-flex items-center gap-2"
-                    title={check.dirtyWorkingTree ? 'Commit or stash local changes first' : 'git pull --ff-only'}
+                    title="Fetch + reset to origin (auto-stashes any local changes first)"
                   >
                     {applying && <span className="w-3 h-3 border-2 border-black border-t-transparent rounded-full animate-spin" />}
                     {applying ? 'Updating…' : 'Update now'}
@@ -146,16 +146,19 @@ export default function AboutSettings() {
                     <button onClick={() => location.reload()} className="bg-accent text-black px-3 py-1 rounded-full text-xs font-semibold">Reload</button>
                   </>
                 )}
+                {/* Local changes are no longer a blocker — the backend auto-stashes them
+                    with `git stash push -u` before the hard-reset. Shown as info, not a warning. */}
                 {check.dirtyWorkingTree && !applyResult && (
-                  <span className="text-yellow-300">Local changes present — commit or stash first</span>
+                  <span className="text-xs text-text-muted">(local changes will be auto-stashed)</span>
                 )}
               </div>
             </div>
           )}
 
           <p className="text-xs text-text-muted">
-            Update applies via <code className="font-mono">git fetch</code> + <code className="font-mono">git pull --ff-only</code>.
-            Your local edits are never overwritten: if the pull can't fast-forward, it aborts with a message.
+            Update applies via <code className="font-mono">git fetch</code> + <code className="font-mono">git reset --hard origin/&lt;branch&gt;</code>.
+            Any local edits are auto-stashed first (<code className="font-mono">git stash push -u</code> with a timestamped message),
+            so clicking "Update now" will <em>always</em> proceed — nothing gets lost, and you can recover stashed edits with <code className="font-mono">git stash list</code> afterwards.
             Native dependencies (like <code className="font-mono">better-sqlite3</code>) are re-linked automatically by <code className="font-mono">run.bat</code> / <code className="font-mono">run.sh</code> the next time the app launches — they detect that <code className="font-mono">package.json</code> changed.
           </p>
         </div>
