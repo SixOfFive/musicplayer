@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import YearTagAudit from './YearTagAudit';
+import type { PlaylistSaveMode } from '../../../shared/types';
 
 interface Dir { id: number; path: string; enabled: boolean; lastScannedAt: number | null; }
 
@@ -249,6 +250,8 @@ export default function LibrarySettings() {
             />
             <span>Also export Liked Songs as <code className="font-mono">Liked Songs.m3u8</code></span>
           </label>
+
+          <PlaylistSaveModeControl />
         </div>
       </div>
 
@@ -351,6 +354,123 @@ function MigrateArtButton() {
                 {result.errors.map((e, i) => <li key={i} className="text-red-400">{e}</li>)}
               </ul>
             </details>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Radio-group control for `playlistExport.saveMode` + a live status
+ * readout showing which mode is currently effective and how many
+ * edits are queued (only meaningful in on-close mode).
+ *
+ * User-visible states:
+ *   Auto           — immediate saves until a >1s write, then switches
+ *                    itself to on-close for the rest of the session.
+ *                    Status line reveals the auto-detected current mode.
+ *   Immediate      — always save on every edit, even if slow.
+ *   Save on close  — queue edits, flush on app quit (or manual button).
+ *
+ * Flipping from auto → any explicit mode resets `autoDetectedMode` to
+ * 'immediate' so a later flip back to auto starts fresh.
+ */
+function PlaylistSaveModeControl() {
+  const [mode, setMode] = useState<PlaylistSaveMode>('auto');
+  const [status, setStatus] = useState<{ saveMode: PlaylistSaveMode; autoDetectedMode: 'immediate' | 'on-close'; effective: 'immediate' | 'on-close'; pending: number } | null>(null);
+  const [flushing, setFlushing] = useState(false);
+
+  async function refreshStatus() {
+    try {
+      const s = await (window.mp.playlists as any).schedStatus();
+      setStatus(s);
+      setMode(s.saveMode);
+    } catch { /* noop — settings panel shouldn't die if IPC hiccups */ }
+  }
+
+  // Poll status every 2s while the panel is open so the "pending" count
+  // reflects new edits that landed while the user is looking.
+  useEffect(() => {
+    void refreshStatus();
+    const t = setInterval(refreshStatus, 2000);
+    return () => clearInterval(t);
+  }, []);
+
+  async function pickMode(next: PlaylistSaveMode) {
+    setMode(next);
+    // Flipping to an explicit mode resets the auto-detected latch so a
+    // later switch back to 'auto' starts fresh and re-observes timing.
+    const patch: any = { playlistExport: { saveMode: next } };
+    if (next !== 'auto') patch.playlistExport.autoDetectedMode = 'immediate';
+    await window.mp.settings.set(patch);
+    void refreshStatus();
+  }
+
+  async function flushNow() {
+    setFlushing(true);
+    try {
+      await (window.mp.playlists as any).flushNow();
+      await refreshStatus();
+    } catch { /* reported via the status poll */ }
+    setFlushing(false);
+  }
+
+  return (
+    <div className="pt-3 border-t border-white/5">
+      <div className="text-xs text-text-muted mb-1">When to save playlists to disk</div>
+      <div className="flex flex-col gap-1">
+        <label className="inline-flex items-center gap-2">
+          <input type="radio" name="plsave" checked={mode === 'auto'} onChange={() => pickMode('auto')} />
+          <span>
+            Auto
+            <span className="text-text-muted text-xs ml-2">
+              (save immediately; switch to on-close after any slow write &gt; 1s)
+            </span>
+          </span>
+        </label>
+        <label className="inline-flex items-center gap-2">
+          <input type="radio" name="plsave" checked={mode === 'immediate'} onChange={() => pickMode('immediate')} />
+          <span>
+            Always save immediately
+            <span className="text-text-muted text-xs ml-2">(keeps disk in sync on every edit; may cause UI lag on big playlists over SMB)</span>
+          </span>
+        </label>
+        <label className="inline-flex items-center gap-2">
+          <input type="radio" name="plsave" checked={mode === 'on-close'} onChange={() => pickMode('on-close')} />
+          <span>
+            Save on app close
+            <span className="text-text-muted text-xs ml-2">(snappy edits; pending changes flush at quit)</span>
+          </span>
+        </label>
+      </div>
+
+      {/* Live status. Helpful in 'auto' mode where the effective mode
+          can change mid-session. Also shows the pending-queue count
+          when we're in on-close mode, with a manual flush button. */}
+      {status && (
+        <div className="mt-2 text-xs text-text-muted flex items-center gap-3">
+          <span>
+            Currently saving{' '}
+            <span className="text-text-primary">
+              {status.effective === 'immediate' ? 'immediately' : 'on close'}
+            </span>
+            {status.saveMode === 'auto' && status.effective === 'on-close' && (
+              <> — auto-switched after a slow write</>
+            )}
+          </span>
+          {status.pending > 0 && (
+            <>
+              <span className="text-amber-400">{status.pending} edit{status.pending === 1 ? '' : 's'} queued</span>
+              <button
+                onClick={flushNow}
+                disabled={flushing}
+                className="px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 text-[10px] disabled:opacity-50"
+                title="Write every queued playlist to disk right now"
+              >
+                {flushing ? 'Saving…' : 'Save now'}
+              </button>
+            </>
           )}
         </div>
       )}

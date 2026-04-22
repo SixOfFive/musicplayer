@@ -21,6 +21,13 @@ function defaults(): AppSettings {
       folder: '',                 // empty → auto-resolve at write time
       pathStyle: 'absolute',
       exportLiked: true,
+      // Start in 'auto': immediate saves with automatic flip to
+      // on-close after the first slow write (>1s). The detected mode
+      // is sticky across restarts so a user whose library is on a
+      // slow SMB share doesn't re-experience the first-write lag
+      // every app launch.
+      saveMode: 'auto',
+      autoDetectedMode: 'immediate',
     },
     update: {
       enabled: true,

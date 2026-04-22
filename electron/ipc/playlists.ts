@@ -1,7 +1,16 @@
 import type { IpcMain } from 'electron';
 import { IPC, LIKED_PLAYLIST_ID } from '../../shared/types';
 import { getDb } from '../services/db';
-import { exportPlaylist, removeExportedPlaylist, exportAllPlaylists, importPlaylistsFromFolder } from '../services/playlist-export';
+import {
+  scheduleExportPlaylist,
+  scheduleRemoveExportedPlaylist,
+  exportAllPlaylists,
+  importPlaylistsFromFolder,
+  dirtyPlaylistCount,
+  flushDirtyPlaylists,
+  fixCorruptPlaylistFiles,
+} from '../services/playlist-export';
+import { getSettings } from '../services/settings-store';
 
 export function registerPlaylistsIpc(ipcMain: IpcMain) {
   ipcMain.handle(IPC.PL_LIST, () => {
@@ -70,7 +79,7 @@ export function registerPlaylistsIpc(ipcMain: IpcMain) {
       .prepare('INSERT INTO playlists (name, description, kind, created_at, updated_at) VALUES (?, ?, \'manual\', ?, ?)')
       .run(name, description, now, now);
     const id = info.lastInsertRowid as number;
-    await exportPlaylist(id);
+    await scheduleExportPlaylist(id);
     return id;
   });
 
@@ -80,15 +89,15 @@ export function registerPlaylistsIpc(ipcMain: IpcMain) {
       .prepare('UPDATE playlists SET name = ?, description = ?, updated_at = ? WHERE id = ?')
       .run(name, description, Date.now(), id);
     // If the name changed, delete the old .m3u8 and write a fresh one under the new name.
-    if (oldRow && oldRow.name !== name) await removeExportedPlaylist(oldRow.name);
-    await exportPlaylist(id);
+    if (oldRow && oldRow.name !== name) await scheduleRemoveExportedPlaylist(oldRow.name);
+    await scheduleExportPlaylist(id);
     return true;
   });
 
   ipcMain.handle(IPC.PL_DELETE, async (_e, id: number) => {
     const oldRow = getDb().prepare('SELECT name FROM playlists WHERE id = ?').get(id) as { name: string } | undefined;
     getDb().prepare('DELETE FROM playlists WHERE id = ?').run(id);
-    if (oldRow) await removeExportedPlaylist(oldRow.name);
+    if (oldRow) await scheduleRemoveExportedPlaylist(oldRow.name);
     return true;
   });
 
@@ -130,7 +139,7 @@ export function registerPlaylistsIpc(ipcMain: IpcMain) {
       const now = Date.now();
       const tx = getDb().transaction((ids: number[]) => { for (const tid of ids) stmt.run(tid, now); });
       tx(trackIds);
-      await exportPlaylist(LIKED_PLAYLIST_ID);
+      await scheduleExportPlaylist(LIKED_PLAYLIST_ID);
       return true;
     }
     const maxRow = getDb()
@@ -144,7 +153,7 @@ export function registerPlaylistsIpc(ipcMain: IpcMain) {
       getDb().prepare('UPDATE playlists SET updated_at = ? WHERE id = ?').run(now, id);
     });
     tx(trackIds);
-    await exportPlaylist(id);
+    await scheduleExportPlaylist(id);
     return true;
   });
 
@@ -153,7 +162,7 @@ export function registerPlaylistsIpc(ipcMain: IpcMain) {
       const stmt = getDb().prepare('DELETE FROM track_likes WHERE track_id = ?');
       const tx = getDb().transaction((ids: number[]) => { for (const tid of ids) stmt.run(tid); });
       tx(trackIds);
-      await exportPlaylist(LIKED_PLAYLIST_ID);
+      await scheduleExportPlaylist(LIKED_PLAYLIST_ID);
       return true;
     }
     const stmt = getDb().prepare('DELETE FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?');
@@ -162,7 +171,7 @@ export function registerPlaylistsIpc(ipcMain: IpcMain) {
       getDb().prepare('UPDATE playlists SET updated_at = ? WHERE id = ?').run(Date.now(), id);
     });
     tx(trackIds);
-    await exportPlaylist(id);
+    await scheduleExportPlaylist(id);
     return true;
   });
 
@@ -173,7 +182,7 @@ export function registerPlaylistsIpc(ipcMain: IpcMain) {
       getDb().prepare('UPDATE playlists SET updated_at = ? WHERE id = ?').run(Date.now(), id);
     });
     tx();
-    await exportPlaylist(id);
+    await scheduleExportPlaylist(id);
     return true;
   });
 
@@ -187,7 +196,7 @@ export function registerPlaylistsIpc(ipcMain: IpcMain) {
       getDb().prepare('INSERT INTO track_likes (track_id, liked_at) VALUES (?, ?)').run(trackId, Date.now());
       liked = true;
     }
-    await exportPlaylist(LIKED_PLAYLIST_ID);
+    await scheduleExportPlaylist(LIKED_PLAYLIST_ID);
     return liked;
   });
 
@@ -198,4 +207,35 @@ export function registerPlaylistsIpc(ipcMain: IpcMain) {
 
   ipcMain.handle(IPC.PL_EXPORT_ALL, () => exportAllPlaylists());
   ipcMain.handle(IPC.PL_IMPORT_FROM_FOLDER, () => importPlaylistsFromFolder());
+
+  // Save-scheduler status. Returns pending count + the effective mode
+  // so the Library settings panel can show "3 edits queued — save on
+  // close" with an option to flush now.
+  ipcMain.handle(IPC.PL_SCHED_STATUS, () => {
+    const s = getSettings().playlistExport;
+    const effective = s?.saveMode === 'on-close'
+      ? 'on-close'
+      : s?.saveMode === 'immediate'
+        ? 'immediate'
+        : (s?.autoDetectedMode ?? 'immediate');
+    return {
+      saveMode: s?.saveMode ?? 'auto',
+      autoDetectedMode: s?.autoDetectedMode ?? 'immediate',
+      effective,
+      pending: dirtyPlaylistCount(),
+    };
+  });
+
+  // Manual flush — "Save all pending now" button in the settings panel.
+  ipcMain.handle(IPC.PL_SCHED_FLUSH, () => flushDirtyPlaylists());
+
+  // Rewrite corrupt playlist files — drops malformed lines, keeps only
+  // successfully-parsed entries. Called from the Import dialog when
+  // the user opts in to fixing specific files after a partial-parse
+  // warning. Safe to pass paths that turn out to have nothing
+  // salvageable; those are reported back in `errors`.
+  ipcMain.handle(IPC.PL_FIX_CORRUPT, (_e, absPaths: string[]) => {
+    if (!Array.isArray(absPaths) || absPaths.length === 0) return { fixed: 0, errors: [] };
+    return fixCorruptPlaylistFiles(absPaths);
+  });
 }

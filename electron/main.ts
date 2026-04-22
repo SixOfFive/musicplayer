@@ -25,7 +25,7 @@ import { registerMediaKeys } from './services/media-keys';
 import { registerSuggestionsIpc } from './ipc/suggestions';
 import { registerTagAuditIpc } from './ipc/tag-audit';
 import { setAutoUpdaterWindow } from './services/updater';
-import { importPlaylistsFromFolder } from './services/playlist-export';
+import { importPlaylistsFromFolder, flushDirtyPlaylists, dirtyPlaylistCount } from './services/playlist-export';
 import { initDatabase } from './services/db';
 import { initSettings, getSettings } from './services/settings-store';
 
@@ -550,24 +550,47 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-// Persist the image cache on quit. `before-quit` fires before windows
-// start closing, which is the latest reliable hook for async work in
+// Flush pending work on quit. `before-quit` fires before windows start
+// closing, which is the latest reliable hook for async work in
 // Electron — any later and `app.exit()` can fire while writeFile is
-// still pending. We explicitly event.preventDefault() and re-quit after
-// the save so the process truly waits for the flush.
+// still pending. We explicitly event.preventDefault() and re-quit
+// after the saves so the process truly waits for the flush.
 //
-// No-op when the cache isn't dirty (saveImageCache short-circuits).
+// Two things we flush here:
+//   1. Image cache — 256 MB LRU of cover thumbnails, only written if
+//      it's dirty.
+//   2. Pending playlist exports — when the save-mode scheduler latched
+//      onto 'on-close' (or the user chose it explicitly), edits pile
+//      up in an in-memory queue and only hit disk at quit time.
+//      Deferring means the UI stays snappy on big-playlist edits, so
+//      quit-time is when the user pays the 3-second write cost — but
+//      only once for the whole session instead of on every edit.
 let quitInProgress = false;
 app.on('before-quit', (event) => {
-  if (quitInProgress || !imageCacheDir) return;
-  if (!imageMemCache.isDirty()) return;
+  if (quitInProgress) return;
+  const imageDirty = imageCacheDir && imageMemCache.isDirty();
+  const plDirty = dirtyPlaylistCount() > 0;
+  if (!imageDirty && !plDirty) return;
   event.preventDefault();
   quitInProgress = true;
-  saveImageCache(imageCacheDir).then((r) => {
-    if (r.wrote) process.stdout.write(`[image-cache] persisted ${r.saved} cover${r.saved === 1 ? '' : 's'} to disk before quit\n`);
+
+  (async () => {
+    if (plDirty) {
+      try {
+        const r = await flushDirtyPlaylists();
+        if (r.errors > 0) process.stdout.write(`[playlist-export] ${r.errors} error(s) during flush-on-quit\n`);
+      } catch (err: any) {
+        process.stdout.write(`[playlist-export] flush-on-quit FAILED: ${err?.message ?? err}\n`);
+      }
+    }
+    if (imageDirty) {
+      try {
+        const r = await saveImageCache(imageCacheDir!);
+        if (r.wrote) process.stdout.write(`[image-cache] persisted ${r.saved} cover${r.saved === 1 ? '' : 's'} to disk before quit\n`);
+      } catch (err: any) {
+        process.stdout.write(`[image-cache] persist on quit FAILED: ${err?.message ?? err}\n`);
+      }
+    }
     app.quit();
-  }).catch((err: any) => {
-    process.stdout.write(`[image-cache] persist on quit FAILED: ${err?.message ?? err}\n`);
-    app.quit();
-  });
+  })();
 });

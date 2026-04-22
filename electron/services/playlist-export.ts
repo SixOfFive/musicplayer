@@ -2,7 +2,7 @@ import { app } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { getDb } from './db';
-import { getSettings } from './settings-store';
+import { getSettings, updateSettings } from './settings-store';
 import { LIKED_PLAYLIST_ID } from '../../shared/types';
 
 const LIKED_FILENAME = 'Liked Songs';
@@ -164,27 +164,68 @@ export async function removeExportedPlaylist(name: string): Promise<void> {
  * Handles both `#EXTINF:` extended form and plain-path form. Returns paths as
  * absolute — relative entries are resolved against the file's directory.
  */
-async function parseM3U(filePath: string): Promise<{ paths: string[]; playlistName: string }> {
+interface ParsedM3U {
+  paths: string[];
+  playlistName: string;
+  /** Non-fatal parsing issues we skipped past — e.g. a line that looks
+   *  like a path but pointed nowhere we could resolve, UTF-8 decode
+   *  failures on a single row, or an orphan `#EXTINF:` without a
+   *  following path. Not fatal to the import; surfaced so the UI can
+   *  offer to rewrite the playlist with only the good entries. */
+  skipped: Array<{ lineNo: number; raw: string; reason: string }>;
+}
+
+/**
+ * Parse a .m3u8 on a best-effort basis. Malformed lines are collected
+ * into `skipped` and the parse continues; only a file-read failure or
+ * a catastrophically-unreadable file (e.g. binary with no text lines)
+ * throws.
+ */
+async function parseM3U(filePath: string): Promise<ParsedM3U> {
   const raw = await fs.readFile(filePath, 'utf8');
-  const lines = raw.split(/\r?\n/);
+  // Strip a leading BOM — some Windows tools add EF BB BF to the front
+  // of utf8 files and the first line would otherwise come through
+  // as "\uFEFF#EXTM3U" which blows up the # detector.
+  const cleaned = raw.charCodeAt(0) === 0xFEFF ? raw.slice(1) : raw;
+  const lines = cleaned.split(/\r?\n/);
   const dir = path.dirname(filePath);
   const paths: string[] = [];
-  let playlistName = path.basename(filePath, '.m3u8');
-  for (const line of lines) {
-    const trimmed = line.trim();
+  const skipped: ParsedM3U['skipped'] = [];
+  const playlistName = path.basename(filePath, '.m3u8');
+
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    const trimmed = raw.trim();
     if (!trimmed) continue;
-    if (trimmed.startsWith('#PLAYLIST:')) {
-      // Some players write a title here; we prefer the filename, but keep it for name fallback.
+    // Directive lines — #EXTM3U header, #EXTINF:<dur>,<title>, #PLAYLIST: …
+    // etc. Silently skip directives; if the line starts with # but
+    // doesn't look like one of ours, still skip (other tools embed
+    // custom extensions like #EXTGRP, #EXTVLCOPT, etc.).
+    if (trimmed.startsWith('#')) continue;
+
+    // Ban absurdly-long "paths" (> 4 KB) and anything containing
+    // non-printable junk — these are the giveaway that a file got
+    // mangled (e.g. saved as UTF-16 then copy-pasted to UTF-8).
+    if (trimmed.length > 4096) {
+      skipped.push({ lineNo: i + 1, raw: trimmed.slice(0, 120) + '…', reason: 'line too long (>4 KB) — likely binary garbage' });
       continue;
     }
-    if (trimmed.startsWith('#')) continue;
-    // Absolute vs relative resolution.
-    const isAbs = path.isAbsolute(trimmed) || /^[A-Za-z]:[\\/]/.test(trimmed);
-    const full = isAbs ? trimmed : path.resolve(dir, trimmed);
-    // Normalize slashes for the current OS (m3u often uses forward slashes on Windows).
-    paths.push(path.normalize(full));
+    if (/[\u0000-\u0008\u000E-\u001F]/.test(trimmed)) {
+      skipped.push({ lineNo: i + 1, raw: trimmed.slice(0, 120), reason: 'contains control characters' });
+      continue;
+    }
+
+    // Try to resolve the path. Anything that throws on normalize (very
+    // rare — usually a poison path like NUL char in-band) gets captured.
+    try {
+      const isAbs = path.isAbsolute(trimmed) || /^[A-Za-z]:[\\/]/.test(trimmed);
+      const full = isAbs ? trimmed : path.resolve(dir, trimmed);
+      paths.push(path.normalize(full));
+    } catch (err: any) {
+      skipped.push({ lineNo: i + 1, raw: trimmed, reason: `path resolution failed: ${err?.message ?? err}` });
+    }
   }
-  return { paths, playlistName };
+  return { paths, playlistName, skipped };
 }
 
 /**
@@ -197,17 +238,43 @@ async function parseM3U(filePath: string): Promise<{ paths: string[]; playlistNa
  * are silently dropped — they'll be pickable up next time if the user scans
  * the containing folder.
  */
-export async function importPlaylistsFromFolder(): Promise<{ imported: number; dir: string }> {
+export interface ImportCorruption {
+  /** Filename within the export dir, e.g. "Old mixtape.m3u8" */
+  file: string;
+  /** Absolute path — handed to fixCorruptPlaylistFiles() if the user
+   *  opts in to a rewrite. */
+  absPath: string;
+  /** Issue summary for the UI. Either "parseFailed" (couldn't read
+   *  the file at all) or "partial" (read N lines, M of them bad). */
+  kind: 'parseFailed' | 'partial';
+  /** Human-readable note for display. */
+  message: string;
+  /** Raw per-line skip reasons for the disclosure UI. Empty for
+   *  parseFailed. */
+  skippedLines: Array<{ lineNo: number; raw: string; reason: string }>;
+  /** Total lines scanned + how many good paths survived. Null on
+   *  parseFailed. */
+  scanned: number | null;
+  kept: number | null;
+}
+
+export interface ImportResult {
+  imported: number;
+  dir: string;
+  corruptions: ImportCorruption[];
+}
+
+export async function importPlaylistsFromFolder(): Promise<ImportResult> {
   const settings = getSettings();
-  if (!settings.playlistExport?.enabled) return { imported: 0, dir: '' };
+  if (!settings.playlistExport?.enabled) return { imported: 0, dir: '', corruptions: [] };
   let dir: string;
-  try { dir = await resolveExportDir(); } catch { return { imported: 0, dir: '' }; }
+  try { dir = await resolveExportDir(); } catch { return { imported: 0, dir: '', corruptions: [] }; }
 
   let entries: string[] = [];
   try {
     entries = (await fs.readdir(dir)).filter((n) => n.toLowerCase().endsWith('.m3u8'));
   } catch {
-    return { imported: 0, dir };
+    return { imported: 0, dir, corruptions: [] };
   }
 
   const db = getDb();
@@ -218,26 +285,64 @@ export async function importPlaylistsFromFolder(): Promise<{ imported: number; d
   existingNames.add('liked songs');
 
   let imported = 0;
+  const corruptions: ImportCorruption[] = [];
   for (const entry of entries) {
+    const absPath = path.join(dir, entry);
     const baseName = path.basename(entry, '.m3u8');
     if (existingNames.has(baseName.toLowerCase())) continue;
 
+    // Parse — best-effort. Only a truly unreadable file (disk error,
+    // permissions, totally non-utf8) throws; malformed lines are
+    // surfaced via `skipped`.
+    let parsed: ParsedM3U;
     try {
-      const { paths } = await parseM3U(path.join(dir, entry));
-      if (paths.length === 0) continue;
+      parsed = await parseM3U(absPath);
+    } catch (err: any) {
+      console.error('[playlist-export] import failed for', entry, err?.message ?? err);
+      corruptions.push({
+        file: entry,
+        absPath,
+        kind: 'parseFailed',
+        message: `Couldn't read the file: ${err?.message ?? err}`,
+        skippedLines: [],
+        scanned: null,
+        kept: null,
+      });
+      continue;
+    }
 
-      // Look up each path in the DB. Case-insensitive on Windows is nice but
-      // tracks.path is stored with OS-native casing, so match directly first
-      // and fall back to case-insensitive if needed.
-      const findStmt = db.prepare('SELECT id FROM tracks WHERE path = ?');
-      const findCi   = db.prepare('SELECT id FROM tracks WHERE LOWER(path) = LOWER(?)');
-      const trackIds: number[] = [];
-      for (const p of paths) {
-        const row = (findStmt.get(p) as { id: number } | undefined) ?? (findCi.get(p) as { id: number } | undefined);
-        if (row) trackIds.push(row.id);
-      }
-      if (trackIds.length === 0) continue;
+    if (parsed.skipped.length > 0) {
+      corruptions.push({
+        file: entry,
+        absPath,
+        kind: 'partial',
+        message: `Skipped ${parsed.skipped.length} malformed line${parsed.skipped.length === 1 ? '' : 's'} while importing.`,
+        skippedLines: parsed.skipped,
+        scanned: parsed.skipped.length + parsed.paths.length,
+        kept: parsed.paths.length,
+      });
+    }
 
+    if (parsed.paths.length === 0) {
+      // Nothing usable left after skipping — still surfaces in
+      // corruptions above so the user sees the file. Don't create an
+      // empty playlist row.
+      continue;
+    }
+
+    // Look up each path in the DB. Case-insensitive on Windows is nice but
+    // tracks.path is stored with OS-native casing, so match directly first
+    // and fall back to case-insensitive if needed.
+    const findStmt = db.prepare('SELECT id FROM tracks WHERE path = ?');
+    const findCi   = db.prepare('SELECT id FROM tracks WHERE LOWER(path) = LOWER(?)');
+    const trackIds: number[] = [];
+    for (const p of parsed.paths) {
+      const row = (findStmt.get(p) as { id: number } | undefined) ?? (findCi.get(p) as { id: number } | undefined);
+      if (row) trackIds.push(row.id);
+    }
+    if (trackIds.length === 0) continue;
+
+    try {
       const now = Date.now();
       const info = db.prepare(
         'INSERT INTO playlists (name, description, kind, created_at, updated_at) VALUES (?, ?, \'manual\', ?, ?)',
@@ -251,10 +356,183 @@ export async function importPlaylistsFromFolder(): Promise<{ imported: number; d
       existingNames.add(baseName.toLowerCase());
       imported++;
     } catch (err: any) {
-      console.error('[playlist-export] import failed for', entry, err?.message ?? err);
+      console.error('[playlist-export] DB insert failed for', entry, err?.message ?? err);
     }
   }
-  return { imported, dir };
+  return { imported, dir, corruptions };
+}
+
+/**
+ * Rewrite corrupt .m3u8 files in place — keeping only the successfully-
+ * parsed paths, dropping the malformed lines. Takes a list of absolute
+ * file paths so the caller can cherry-pick which ones to fix. Returns
+ * how many files were rewritten and any failures.
+ *
+ * For 'parseFailed' corruptions there's nothing salvageable; we don't
+ * attempt to rewrite those (caller filters by `kind === 'partial'`).
+ */
+export async function fixCorruptPlaylistFiles(absPaths: string[]): Promise<{ fixed: number; errors: Array<{ path: string; error: string }> }> {
+  const errors: Array<{ path: string; error: string }> = [];
+  let fixed = 0;
+  for (const p of absPaths) {
+    try {
+      const parsed = await parseM3U(p);
+      if (parsed.paths.length === 0) {
+        errors.push({ path: p, error: 'nothing salvageable — refusing to overwrite with an empty file' });
+        continue;
+      }
+      const dir = path.dirname(p);
+      // Rewrite uses the same renderer as a DB-sourced export so the
+      // format + #EXTM3U / #EXTINF metadata match what we'd emit
+      // normally. We don't have duration info for imported tracks,
+      // so EXTINF lines will get `-1` which M3U parsers treat as
+      // unknown.
+      const lines: string[] = ['#EXTM3U'];
+      for (const abs of parsed.paths) {
+        lines.push(`#EXTINF:-1,${path.basename(abs, path.extname(abs))}`);
+        // Preserve the original absolute paths since we don't know
+        // what pathStyle the original was written in.
+        lines.push(abs);
+      }
+      const tmpPath = p + '.fixtmp';
+      await fs.writeFile(tmpPath, lines.join('\n') + '\n', 'utf8');
+      await fs.rename(tmpPath, p);
+      fixed++;
+      process.stdout.write(`[playlist-export] fixed corrupt playlist ${path.basename(p)} — kept ${parsed.paths.length}, dropped ${parsed.skipped.length}\n`);
+    } catch (err: any) {
+      errors.push({ path: p, error: err?.message ?? String(err) });
+    }
+  }
+  return { fixed, errors };
+}
+
+// ----------------------------------------------------------------------------
+// Scheduler: immediate vs on-close vs auto
+// ----------------------------------------------------------------------------
+//
+// Every playlist-edit IPC handler used to await exportPlaylist() directly,
+// which means a slow write (big playlist on SMB, cold disk) froze the UI
+// for the duration of the write. `scheduleExportPlaylist` wraps that:
+//
+//   immediate  — call exportPlaylist now, time it. If > threshold, latch
+//                autoDetectedMode to 'on-close' (only affects 'auto' mode;
+//                explicit 'immediate' stays immediate).
+//   on-close   — add to the dirty set, return synchronously. Exported
+//                during app quit via flushDirtyPlaylists().
+//   auto       — inspect settings.playlistExport.autoDetectedMode to pick
+//                between the two paths above.
+//
+// Deletes follow the same scheduling. A playlist that's been renamed
+// gets both a delete-of-old-name AND an export-of-new-name; when on-
+// close is active, we queue the delete by old name too.
+
+/** Latch threshold. A single export taking longer than this flips
+ *  autoDetectedMode from 'immediate' to 'on-close'. 1 second is the
+ *  user-perceptible boundary where UI lag starts feeling noticeable. */
+const SLOW_SAVE_THRESHOLD_MS = 1000;
+
+/** Dirty state — pending writes and deletions waiting for flush. Keyed
+ *  by playlist id for writes (so rapid edits to the same playlist
+ *  coalesce into one write at flush). Deletes are keyed by sanitised
+ *  filename since the playlist row is already gone. */
+const dirtyWriteIds = new Set<number>();
+const dirtyDeleteNames = new Set<string>();
+
+function currentEffectiveMode(): 'immediate' | 'on-close' {
+  const s = getSettings().playlistExport;
+  if (!s) return 'immediate';
+  if (s.saveMode === 'immediate') return 'immediate';
+  if (s.saveMode === 'on-close')  return 'on-close';
+  // 'auto': trust what the scheduler has latched onto.
+  return s.autoDetectedMode ?? 'immediate';
+}
+
+/** Latch the auto-detected mode to 'on-close' after observing a slow
+ *  write. No-op if the user has explicitly set saveMode to something
+ *  else — the auto flag only drives behaviour when saveMode='auto'. */
+async function latchSlowMode(elapsedMs: number): Promise<void> {
+  const s = getSettings().playlistExport;
+  if (!s) return;
+  if (s.autoDetectedMode === 'on-close') return; // already latched
+  process.stdout.write(`[playlist-export] write took ${elapsedMs}ms — latching autoDetectedMode to 'on-close'\n`);
+  await updateSettings({ playlistExport: { autoDetectedMode: 'on-close' } } as any);
+}
+
+/**
+ * Schedule a playlist export. Fire-and-forget from the caller's POV:
+ * IPC handlers can `void scheduleExportPlaylist(id)` after their DB
+ * write and never block on it. Errors are logged, never thrown.
+ */
+export async function scheduleExportPlaylist(playlistId: number, _oldNameIfRenamed?: string | null): Promise<void> {
+  const mode = currentEffectiveMode();
+  if (mode === 'on-close') {
+    dirtyWriteIds.add(playlistId);
+    return;
+  }
+  const t0 = Date.now();
+  await exportPlaylist(playlistId, _oldNameIfRenamed);
+  const dt = Date.now() - t0;
+  if (dt > SLOW_SAVE_THRESHOLD_MS) {
+    // Slow write detected. Flip to on-close for subsequent edits.
+    // This edit has already landed on disk, so no dirty queueing
+    // needed for it specifically.
+    await latchSlowMode(dt);
+  }
+}
+
+/** Schedule a delete of an exported file by playlist name. Same
+ *  immediate/on-close split as scheduleExportPlaylist. */
+export async function scheduleRemoveExportedPlaylist(name: string): Promise<void> {
+  const mode = currentEffectiveMode();
+  if (mode === 'on-close') {
+    dirtyDeleteNames.add(name);
+    return;
+  }
+  const t0 = Date.now();
+  await removeExportedPlaylist(name);
+  const dt = Date.now() - t0;
+  if (dt > SLOW_SAVE_THRESHOLD_MS) await latchSlowMode(dt);
+}
+
+/**
+ * Flush every queued write and delete. Called from main.ts's
+ * before-quit handler. Resolves when all I/O is complete. Also
+ * callable via IPC for a manual "save now" button if we ever add
+ * one — idempotent if nothing's dirty. */
+export async function flushDirtyPlaylists(): Promise<{ wrote: number; deleted: number; errors: number }> {
+  let wrote = 0, deleted = 0, errors = 0;
+  // Snapshot + clear so newly-queued writes during flush (unlikely but
+  // possible if IPC handlers land mid-quit) are captured by a second
+  // flush call rather than silently dropped.
+  const writes = Array.from(dirtyWriteIds);
+  const deletes = Array.from(dirtyDeleteNames);
+  dirtyWriteIds.clear();
+  dirtyDeleteNames.clear();
+
+  for (const name of deletes) {
+    try { await removeExportedPlaylist(name); deleted++; }
+    catch (err: any) {
+      errors++;
+      process.stdout.write(`[playlist-export] flush delete "${name}" failed: ${err?.message ?? err}\n`);
+    }
+  }
+  for (const id of writes) {
+    try { await exportPlaylist(id); wrote++; }
+    catch (err: any) {
+      errors++;
+      process.stdout.write(`[playlist-export] flush write id=${id} failed: ${err?.message ?? err}\n`);
+    }
+  }
+  if (wrote > 0 || deleted > 0) {
+    process.stdout.write(`[playlist-export] flushed ${wrote} write${wrote === 1 ? '' : 's'}, ${deleted} delete${deleted === 1 ? '' : 's'} before quit\n`);
+  }
+  return { wrote, deleted, errors };
+}
+
+/** Whether any dirty playlist writes are pending. Used by the settings
+ *  panel to show a "N pending" indicator when on-close mode is active. */
+export function dirtyPlaylistCount(): number {
+  return dirtyWriteIds.size + dirtyDeleteNames.size;
 }
 
 /** Export every playlist + liked. Used on settings change and manual "re-export all". */

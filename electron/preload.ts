@@ -59,6 +59,15 @@ const api = {
     reorder: (id: number, ids: number[]) => ipcRenderer.invoke(IPC.PL_REORDER, id, ids),
     exportAll: () => ipcRenderer.invoke(IPC.PL_EXPORT_ALL),
     importFromFolder: () => ipcRenderer.invoke(IPC.PL_IMPORT_FROM_FOLDER),
+    // Save-scheduler status + manual flush. `status` reports how many
+    // edits are queued in on-close mode and what mode is currently
+    // effective; `flushNow` drains the queue on demand.
+    schedStatus: () => ipcRenderer.invoke(IPC.PL_SCHED_STATUS),
+    flushNow: () => ipcRenderer.invoke(IPC.PL_SCHED_FLUSH),
+    // Rewrite corrupt .m3u8 files in place — keeps salvageable tracks,
+    // drops malformed lines. Called by the Import dialog when the
+    // user opts in to fixing a partial-parse file.
+    fixCorrupt: (absPaths: string[]) => ipcRenderer.invoke(IPC.PL_FIX_CORRUPT, absPaths),
   },
   likes: {
     toggle: (trackId: number) => ipcRenderer.invoke(IPC.LIKE_TOGGLE, trackId),

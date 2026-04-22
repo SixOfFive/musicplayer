@@ -160,6 +160,21 @@ export interface ConvertProgress {
 
 export type PlaylistPathStyle = 'absolute' | 'relative';
 
+/**
+ * When to write playlists back to disk.
+ *   'auto'       — start by saving immediately on every edit. If any
+ *                  single save takes longer than 1 second (big playlist
+ *                  on a slow network share, typical trigger), flip
+ *                  internally to on-close mode for the rest of the
+ *                  session. The auto-detected state is remembered so
+ *                  the next launch starts in on-close if it was slow.
+ *   'immediate'  — always write on every edit. User override: forces
+ *                  immediate behaviour even if detection flipped.
+ *   'on-close'   — never write on edit. Pending changes accumulate
+ *                  and flush when the app quits (before-quit handler).
+ */
+export type PlaylistSaveMode = 'auto' | 'immediate' | 'on-close';
+
 export interface PlaylistExportSettings {
   enabled: boolean;
   // Absolute folder path where `.m3u8` files are written. Blank = auto-resolve
@@ -170,6 +185,14 @@ export interface PlaylistExportSettings {
   pathStyle: PlaylistPathStyle;
   // Also sync the Liked Songs virtual playlist as a real .m3u8 file.
   exportLiked: boolean;
+  /** User-visible toggle — see PlaylistSaveMode. Defaults to 'auto'. */
+  saveMode: PlaylistSaveMode;
+  /** What 'auto' resolved to on this machine. Only meaningful when
+   *  `saveMode === 'auto'`; starts at 'immediate' and latches to
+   *  'on-close' after the first slow write. Explicit overrides (user
+   *  setting saveMode to 'immediate' or 'on-close') reset this to
+   *  'immediate' so the next switch back to 'auto' re-detects. */
+  autoDetectedMode: 'immediate' | 'on-close';
 }
 
 export interface LastFmSettings {
@@ -356,6 +379,12 @@ export const IPC = {
   // track_likes + track attributes (artist / album / genre / year).
   // No external calls, no ML — pure scoring over the user's own data.
   SUGGESTIONS_GET: 'suggestions:get',
+  // Playlist export scheduler status + manual flush. Used by the
+  // Library settings panel to show how many edits are queued when
+  // save-on-close mode is active and offer a manual "save now".
+  PL_SCHED_STATUS: 'pl:sched-status',
+  PL_SCHED_FLUSH: 'pl:sched-flush',
+  PL_FIX_CORRUPT: 'pl:fix-corrupt',
   // Fat aggregate dump for the fun-fact banner. Computed on demand —
   // the panel fetches once per mount and reshuffles the fact order.
   STATS_NEAT: 'stats:neat',

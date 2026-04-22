@@ -249,8 +249,15 @@ npm run electron:build      # produces platform installer via electron-builder
 
 ### Playlists (universal .m3u8 format)
 - **Left-sidebar "Playlists" tab** → dedicated grid view with Export-all / Import-from-folder buttons
-- **Auto-export on every edit** — creating, renaming, adding/removing/reordering tracks, and liking/unliking all write a `.m3u8` immediately
-- **Startup import** — any `.m3u8` in the export folder that isn't already in the DB gets loaded as a new playlist
+- **Auto-export on every edit** — creating, renaming, adding/removing/reordering tracks, and liking/unliking write a `.m3u8` file. Three save-timing modes selectable in Settings → Library:
+  - **Auto** (default) — saves immediately on every edit. If any single write takes longer than 1 second (big playlist on a slow network share), the app automatically latches to on-close mode for the rest of the session so the UI stays snappy. The detected mode is remembered across launches.
+  - **Always save immediately** — writes on every edit, even if slow. User override of the auto behaviour.
+  - **Save on app close** — queues edits in memory and flushes at quit. The settings panel shows "N edits queued" with a manual "Save now" button if you want to flush without quitting.
+- **Startup import** — any `.m3u8` in the export folder that isn't already in the DB gets loaded as a new playlist. Best-effort parsing: malformed lines (control characters, garbage-length rows, unresolvable paths) are skipped rather than aborting the whole file. The Import dialog in the Playlists view surfaces any corrupt files it touched with:
+  - A per-file report listing each skipped line with its reason
+  - A **Fix** button that rewrites the `.m3u8` in place, keeping only the salvageable entries
+  - A **Skip** button that leaves the file untouched
+  - A **Fix all** shortcut for batch-rewriting every "partial" file at once
 - **Liked Songs** is a virtual playlist (backed by `track_likes` table) that also exports as `Liked Songs.m3u8`
 - Playlist format: `#EXTM3U` + `#EXTINF:<sec>,<artist> - <title>` — readable by foobar2000, MusicBee, VLC, Winamp, Jellyfin, Plex, Navidrome, iTunes, and every Android music player
 - Path style selectable: absolute (default) or relative (portable with the music tree)
