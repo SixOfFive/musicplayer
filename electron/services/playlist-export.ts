@@ -9,23 +9,32 @@ const LIKED_FILENAME = 'Liked Songs';
 
 /**
  * Resolve the directory where playlists should be written.
- *   1. settings.playlistExport.folder if set
- *   2. <first music dir>/Playlists
- *   3. userData/Playlists (always writable fallback)
  *
- * Falls back on any permission error. Always creates the directory.
+ *   1. settings.playlistExport.folder if set — used AS-IS, no subfolder
+ *      appending. Whatever absolute path the user picked is what gets
+ *      written to. This used to silently append "/Playlists" under some
+ *      paths which looked like the app was second-guessing the pick;
+ *      it no longer does.
+ *   2. <userData>/Playlists — auto-fallback only when folder is blank.
+ *      Lives inside the app's own data directory (%APPDATA%\musicplayer\
+ *      on Windows) so it's never inside the user's music tree and can't
+ *      be mistaken for something we added on top of their pick.
+ *
+ * Falls back between candidates on any write failure. Always creates
+ * the directory if it doesn't exist.
  */
 async function resolveExportDir(): Promise<string> {
   const settings = getSettings();
   const explicit = settings.playlistExport?.folder?.trim();
   const candidates: string[] = [];
+  // User's explicit pick — used exactly as provided. No Playlists
+  // subfolder magic; absolute path in, same path out.
   if (explicit) candidates.push(explicit);
 
-  const firstMusicDir = (getDb()
-    .prepare('SELECT path FROM directories WHERE enabled = 1 ORDER BY id LIMIT 1')
-    .get() as { path: string } | undefined)?.path;
-  if (firstMusicDir) candidates.push(path.join(firstMusicDir, 'Playlists'));
-
+  // Fallback when nothing's configured: an app-local subfolder under
+  // userData. NOT under the music library — writing there mixes
+  // playlists with audio and made users think the app was silently
+  // bolting "Playlists" onto whatever folder they picked.
   candidates.push(path.join(app.getPath('userData'), 'Playlists'));
 
   for (const dir of candidates) {

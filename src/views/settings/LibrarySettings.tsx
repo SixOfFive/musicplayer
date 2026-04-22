@@ -204,7 +204,7 @@ export default function LibrarySettings() {
           </label>
 
           <div>
-            <label className="text-xs text-text-muted">Export folder (leave blank for auto: <code className="font-mono">&lt;music folder&gt;/Playlists</code>)</label>
+            <label className="text-xs text-text-muted">Export folder — absolute path, used exactly as picked (leave blank for app's private data folder)</label>
             <div className="flex gap-2 mt-1">
               <input
                 value={plExportFolder}
@@ -213,7 +213,7 @@ export default function LibrarySettings() {
                   await window.mp.settings.set({ playlistExport: { folder: plExportFolder.trim() } } as any);
                 }}
                 className="flex-1 bg-bg-base px-2 py-1 rounded text-xs font-mono"
-                placeholder="Auto — will use <music folder>/Playlists"
+                placeholder="Auto — will use the app's private data folder"
               />
               <button
                 onClick={async () => {
