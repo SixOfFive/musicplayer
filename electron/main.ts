@@ -12,6 +12,7 @@ import { registerScanIpc, setProgressWindow, resumeArtFetchOnStartup } from './i
 import { registerVisualizerIpc } from './ipc/visualizer';
 import { registerMetadataIpc } from './ipc/metadata';
 import { registerPlaylistsIpc } from './ipc/playlists';
+import { registerCopyLikedIpc } from './ipc/copy-liked';
 import { registerStatsIpc } from './ipc/stats';
 import { registerConvertIpc } from './ipc/convert';
 import { registerUpdateIpc } from './ipc/update';
@@ -475,6 +476,11 @@ app.whenReady().then(async () => {
   registerVisualizerIpc(ipcMain);
   registerMetadataIpc(ipcMain);
   registerPlaylistsIpc(ipcMain);
+  // "Copy Liked to folder" — separate IPC bundle because it uses an
+  // interactive request/response protocol (conflict + error prompts)
+  // that doesn't fit the invoke/reply pattern of the regular playlist
+  // handlers. Soft-failed because it's a non-essential utility.
+  safeInit('copy-liked-ipc',     () => registerCopyLikedIpc(ipcMain, () => mainWindow));
   registerStatsIpc(ipcMain);
   registerConvertIpc(ipcMain, () => mainWindow);
   registerUpdateIpc(ipcMain);

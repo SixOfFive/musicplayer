@@ -252,6 +252,8 @@ export default function LibrarySettings() {
           </label>
 
           <PlaylistSaveModeControl />
+
+          <CopyLikedToFolder />
         </div>
       </div>
 
@@ -518,6 +520,279 @@ function PlaylistSaveModeControl() {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * "Copy Liked to folder" — portable-export button.
+ *
+ * Flow:
+ *   1. Click button → native folder picker (main-side, so createDirectory works).
+ *   2. Confirm destination → kick off `copyLikedStart` on main.
+ *   3. Main streams progress events. On a conflict (dest file already
+ *      exists) or error (copy/mkdir failed), main pauses the run and
+ *      pushes a prompt event; we show a modal with Skip / Overwrite /
+ *      Skip All / Overwrite All / Abort (conflict) or Continue / Skip
+ *      / Skip All / Abort (error). Our reply via `copyLikedDecide`
+ *      unblocks main.
+ *   4. Terminal event `pl:copy-liked-done` carries the summary — we
+ *      show it in the same panel and reset.
+ *
+ * Only ONE run can be active at a time (main enforces this; UI just
+ * disables the button until `done` arrives). Unmounting mid-run sends
+ * an explicit `copyLikedAbort` so main doesn't sit on a dangling
+ * prompt-resolver promise.
+ */
+function CopyLikedToFolder() {
+  type Phase =
+    | { kind: 'idle' }
+    | { kind: 'picking' }
+    | { kind: 'running'; done: number; total: number; currentFile: string | null }
+    | { kind: 'done'; summary: { total: number; copied: number; overwritten: number; skipped: number; failed: number; aborted: boolean; errors: Array<{ path: string; error: string }> } };
+
+  type ConflictPrompt = { id: number; srcPath: string; destPath: string; artist: string };
+  type ErrorPrompt = { id: number; srcPath: string; destPath: string; error: string; artist: string };
+
+  const [phase, setPhase] = useState<Phase>({ kind: 'idle' });
+  const [destDir, setDestDir] = useState<string | null>(null);
+  const [conflict, setConflict] = useState<ConflictPrompt | null>(null);
+  const [error, setError] = useState<ErrorPrompt | null>(null);
+
+  // Wire up the main → renderer push listeners once per mount. Each
+  // handler updates the appropriate piece of state; the Abort /
+  // Continue / Skip buttons just call copyLikedDecide(id, action).
+  useEffect(() => {
+    const offProgress = (window.mp.playlists as any).onCopyLikedProgress((p: { done: number; total: number; currentFile: string | null }) => {
+      setPhase((prev) =>
+        prev.kind === 'running'
+          ? { ...prev, ...p }
+          : { kind: 'running', ...p });
+    });
+    const offConflict = (window.mp.playlists as any).onCopyLikedConflict((p: ConflictPrompt) => {
+      setConflict(p);
+    });
+    const offError = (window.mp.playlists as any).onCopyLikedError((p: ErrorPrompt) => {
+      setError(p);
+    });
+    const offDone = (window.mp.playlists as any).onCopyLikedDone((summary: any) => {
+      setPhase({ kind: 'done', summary });
+      setConflict(null);
+      setError(null);
+    });
+    return () => {
+      offProgress?.();
+      offConflict?.();
+      offError?.();
+      offDone?.();
+      // If the panel unmounts while a prompt is outstanding, tell main
+      // to stop waiting. Main will resolve as 'abort' and the run ends
+      // cleanly; otherwise we'd leave a dangling promise in main memory.
+      (window.mp.playlists as any).copyLikedAbort?.();
+    };
+  }, []);
+
+  async function pickAndStart() {
+    setPhase({ kind: 'picking' });
+    try {
+      const picked = await (window.mp.playlists as any).copyLikedPickDest();
+      if (!picked) {
+        setPhase({ kind: 'idle' });
+        return;
+      }
+      setDestDir(picked);
+      // Immediately transition to 'running' with a 0/0 placeholder so
+      // the UI shows "Starting…" instead of flickering back to idle
+      // while main is counting likes.
+      setPhase({ kind: 'running', done: 0, total: 0, currentFile: null });
+      await (window.mp.playlists as any).copyLikedStart(picked);
+    } catch (err) {
+      console.error('[copy-liked] start failed', err);
+      setPhase({ kind: 'idle' });
+    }
+  }
+
+  function decide(id: number, action: string, clearKind: 'conflict' | 'error') {
+    (window.mp.playlists as any).copyLikedDecide(id, action);
+    if (clearKind === 'conflict') setConflict(null);
+    else setError(null);
+  }
+
+  return (
+    <div className="pt-3 border-t border-white/5">
+      <div className="font-medium mb-1">Copy Liked songs to a folder</div>
+      <p className="text-xs text-text-muted mb-2">
+        Duplicates every liked track's AUDIO FILE into
+        <code className="font-mono mx-1">&lt;chosen folder&gt;/&lt;Artist&gt;/&lt;original filename&gt;</code>.
+        Useful for making a portable copy on a USB stick or another drive. Originals are left untouched.
+      </p>
+      <div className="flex items-center gap-2">
+        <button
+          onClick={pickAndStart}
+          disabled={phase.kind === 'picking' || phase.kind === 'running'}
+          className="text-xs px-3 py-1.5 rounded bg-accent text-black font-semibold hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {phase.kind === 'picking' ? 'Waiting for folder…'
+            : phase.kind === 'running' ? 'Copying…'
+            : 'Copy Liked to folder…'}
+        </button>
+        {destDir && (phase.kind === 'running' || phase.kind === 'done') && (
+          <span className="text-xs text-text-muted font-mono break-all">→ {destDir}</span>
+        )}
+      </div>
+
+      {/* Live progress */}
+      {phase.kind === 'running' && (
+        <div className="mt-2 text-xs text-text-muted space-y-1">
+          <div>
+            <span className="text-text-primary">{phase.done}</span> / {phase.total || '?'} files
+            {phase.total > 0 && (
+              <span className="ml-2">({Math.round((phase.done / phase.total) * 100)}%)</span>
+            )}
+          </div>
+          {phase.currentFile && (
+            <div className="font-mono text-[11px] opacity-60 break-all">
+              {phase.currentFile}
+            </div>
+          )}
+          {phase.total > 0 && (
+            <div className="h-1 rounded bg-white/5 overflow-hidden">
+              <div
+                className="h-full bg-accent transition-all"
+                style={{ width: `${Math.min(100, (phase.done / phase.total) * 100)}%` }}
+              />
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Final summary + per-failure detail list */}
+      {phase.kind === 'done' && (
+        <div className="mt-2 p-3 bg-bg-base rounded border border-white/5 text-xs space-y-1">
+          <div className="font-medium text-text-primary">
+            {phase.summary.aborted ? 'Aborted' : 'Done'}
+          </div>
+          <div>Total liked tracks: <span className="text-text-primary">{phase.summary.total}</span></div>
+          <div>Copied: <span className="text-text-primary">{phase.summary.copied}</span></div>
+          {phase.summary.overwritten > 0 && (
+            <div>Overwrote existing: <span className="text-text-primary">{phase.summary.overwritten}</span></div>
+          )}
+          {phase.summary.skipped > 0 && (
+            <div>Skipped (already existed): <span className="text-text-primary">{phase.summary.skipped}</span></div>
+          )}
+          {phase.summary.failed > 0 && (
+            <div className="text-red-300">Failed: {phase.summary.failed}</div>
+          )}
+          {phase.summary.errors.length > 0 && (
+            <details>
+              <summary className="cursor-pointer text-text-muted">Errors ({phase.summary.errors.length})</summary>
+              <ul className="mt-1 ml-4 list-disc space-y-1">
+                {phase.summary.errors.map((e, i) => (
+                  <li key={i} className="text-red-300 break-all">
+                    <span className="font-mono">{e.path}</span>
+                    <div className="opacity-70">{e.error}</div>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+          <button
+            onClick={() => { setPhase({ kind: 'idle' }); setDestDir(null); }}
+            className="mt-2 text-xs px-2 py-1 rounded bg-white/10 hover:bg-white/20"
+          >Dismiss</button>
+        </div>
+      )}
+
+      {/* Conflict modal — destination file already exists. Skip /
+          Overwrite / Skip All / Overwrite All / Abort. The extra two
+          "All" variants were added per user request ("or skip all as
+          well") so they don't have to click five hundred times on a
+          re-run. Abort is always available even when a blanket
+          decision would apply. */}
+      {conflict && (
+        <PromptModal
+          title="File already exists"
+          subtitle={conflict.destPath}
+          detail={<>Artist: <span className="font-medium">{conflict.artist}</span></>}
+          buttons={[
+            { label: 'Skip', action: 'skip', variant: 'ghost' },
+            { label: 'Overwrite', action: 'overwrite', variant: 'accent' },
+            { label: 'Skip All', action: 'skip-all', variant: 'ghost' },
+            { label: 'Overwrite All', action: 'overwrite-all', variant: 'accent' },
+            { label: 'Abort', action: 'abort', variant: 'danger' },
+          ]}
+          onDecide={(action) => decide(conflict.id, action, 'conflict')}
+        />
+      )}
+
+      {/* Error modal — copy or mkdir failed. Continue (retry) / Skip /
+          Skip All / Abort. Continue keeps re-trying the same file so a
+          transient network blip can be recovered from without aborting
+          the whole run; Skip All silences future errors for the rest
+          of this run. */}
+      {error && (
+        <PromptModal
+          title="Copy failed"
+          subtitle={error.srcPath}
+          detail={<>
+            <div>Artist: <span className="font-medium">{error.artist}</span></div>
+            <div className="mt-1 text-red-300">{error.error}</div>
+          </>}
+          buttons={[
+            { label: 'Continue', action: 'continue', variant: 'accent' },
+            { label: 'Skip', action: 'skip', variant: 'ghost' },
+            { label: 'Skip All', action: 'skip-all', variant: 'ghost' },
+            { label: 'Abort', action: 'abort', variant: 'danger' },
+          ]}
+          onDecide={(action) => decide(error.id, action, 'error')}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Generic inline-modal prompt for the copy-liked flow. Not a real
+ * portal'd modal — just an absolutely-positioned overlay above the
+ * settings panel. Deliberately blocking: the copy loop in main is
+ * paused until the user picks an option, so we want full attention
+ * here rather than a dismissable toast.
+ */
+function PromptModal({
+  title,
+  subtitle,
+  detail,
+  buttons,
+  onDecide,
+}: {
+  title: string;
+  subtitle: string;
+  detail: React.ReactNode;
+  buttons: Array<{ label: string; action: string; variant: 'accent' | 'ghost' | 'danger' }>;
+  onDecide: (action: string) => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+      <div className="bg-bg-elev-2 border border-white/10 rounded-lg shadow-2xl p-5 max-w-xl w-full mx-4">
+        <div className="text-base font-semibold text-text-primary mb-1">{title}</div>
+        <div className="font-mono text-xs opacity-70 break-all mb-2">{subtitle}</div>
+        <div className="text-xs text-text-muted mb-4">{detail}</div>
+        <div className="flex flex-wrap gap-2 justify-end">
+          {buttons.map((b) => (
+            <button
+              key={b.action}
+              onClick={() => onDecide(b.action)}
+              className={
+                b.variant === 'accent'
+                  ? 'text-xs px-3 py-1.5 rounded bg-accent text-black font-semibold hover:bg-accent-hover'
+                  : b.variant === 'danger'
+                    ? 'text-xs px-3 py-1.5 rounded bg-red-500/80 hover:bg-red-500 text-white'
+                    : 'text-xs px-3 py-1.5 rounded bg-white/10 hover:bg-white/20 text-text-primary'
+              }
+            >{b.label}</button>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

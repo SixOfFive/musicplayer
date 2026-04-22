@@ -69,6 +69,34 @@ const api = {
     // drops malformed lines. Called by the Import dialog when the
     // user opts in to fixing a partial-parse file.
     fixCorrupt: (absPaths: string[]) => ipcRenderer.invoke(IPC.PL_FIX_CORRUPT, absPaths),
+    // Copy every liked track's AUDIO FILE into <dest>/<Artist>/<file>.
+    // Interactive: main sends conflict / error prompt events while the
+    // copy runs, renderer replies via `copyLikedDecide`. See
+    // electron/ipc/copy-liked.ts for the protocol details.
+    copyLikedPickDest: () => ipcRenderer.invoke('pl:copy-liked-pick-dest'),
+    copyLikedStart: (destDir: string) => ipcRenderer.invoke('pl:copy-liked-start', destDir),
+    copyLikedDecide: (id: number, action: string) => ipcRenderer.invoke('pl:copy-liked-decide', { id, action }),
+    copyLikedAbort: () => ipcRenderer.invoke('pl:copy-liked-abort'),
+    onCopyLikedProgress: (cb: (p: { done: number; total: number; currentFile: string | null }) => void) => {
+      const listener = (_: unknown, p: any) => cb(p);
+      ipcRenderer.on('pl:copy-liked-progress', listener);
+      return () => ipcRenderer.removeListener('pl:copy-liked-progress', listener);
+    },
+    onCopyLikedConflict: (cb: (p: { id: number; srcPath: string; destPath: string; artist: string }) => void) => {
+      const listener = (_: unknown, p: any) => cb(p);
+      ipcRenderer.on('pl:copy-liked-conflict', listener);
+      return () => ipcRenderer.removeListener('pl:copy-liked-conflict', listener);
+    },
+    onCopyLikedError: (cb: (p: { id: number; srcPath: string; destPath: string; error: string; artist: string }) => void) => {
+      const listener = (_: unknown, p: any) => cb(p);
+      ipcRenderer.on('pl:copy-liked-error', listener);
+      return () => ipcRenderer.removeListener('pl:copy-liked-error', listener);
+    },
+    onCopyLikedDone: (cb: (p: { total: number; copied: number; overwritten: number; skipped: number; failed: number; aborted: boolean; errors: Array<{ path: string; error: string }> }) => void) => {
+      const listener = (_: unknown, p: any) => cb(p);
+      ipcRenderer.on('pl:copy-liked-done', listener);
+      return () => ipcRenderer.removeListener('pl:copy-liked-done', listener);
+    },
   },
   likes: {
     toggle: (trackId: number) => ipcRenderer.invoke(IPC.LIKE_TOGGLE, trackId),
