@@ -2,6 +2,8 @@
 
 A personal, local-first music player with a Spotify-style interface — Electron + React + TypeScript desktop app for Windows, macOS and Linux (including KDE Plasma).
 
+![MusicPlayer home screen showing library stats, a rotating fun-fact banner, recently-added tracks, and the newest-albums grid](docs/screenshots/home.png)
+
 ## Easiest: download the installer
 
 No Node.js, Git, or terminal needed — just download and run.
