@@ -20,7 +20,9 @@ import { registerLastFmIpc } from './ipc/lastfm';
 import { registerCastIpc } from './ipc/cast';
 import { registerHomeAssistantIpc } from './ipc/homeassistant';
 import { registerDlnaIpc } from './ipc/dlna';
-import { startDlnaDiscovery, startDlnaReceiver } from './services/dlna';
+import { startDlnaDiscovery, startDlnaReceiver, shutdownDlna } from './services/dlna';
+import { stopMediaServer } from './services/media-server';
+import { unregisterMediaKeys } from './services/media-keys';
 import { registerMediaKeys } from './services/media-keys';
 import { registerSuggestionsIpc } from './ipc/suggestions';
 import { registerTagAuditIpc } from './ipc/tag-audit';
@@ -568,13 +570,22 @@ app.on('window-all-closed', () => {
 let quitInProgress = false;
 app.on('before-quit', (event) => {
   if (quitInProgress) return;
-  const imageDirty = imageCacheDir && imageMemCache.isDirty();
-  const plDirty = dirtyPlaylistCount() > 0;
-  if (!imageDirty && !plDirty) return;
+  // Always preventDefault + take the async path. Even when there's no
+  // dirty state to flush, we still want to cleanly tear down the DLNA
+  // receiver's HTTP server + SSDP sockets, the shared media HTTP
+  // server, mDNS bindings, and the globalShortcut registrations.
+  // Leaving any of those open on Windows holds file handles on
+  // node_modules/*.node which blocks electron-updater's uninstall →
+  // reinstall flow, leaving users stuck on an older version.
   event.preventDefault();
   quitInProgress = true;
 
+  const imageDirty = !!(imageCacheDir && imageMemCache.isDirty());
+  const plDirty = dirtyPlaylistCount() > 0;
+
   (async () => {
+    // Persistence first — data integrity beats clean sockets if we're
+    // only going to get one pass at this.
     if (plDirty) {
       try {
         const r = await flushDirtyPlaylists();
@@ -591,6 +602,22 @@ app.on('before-quit', (event) => {
         process.stdout.write(`[image-cache] persist on quit FAILED: ${err?.message ?? err}\n`);
       }
     }
-    app.quit();
+
+    // Socket + process teardown. Each step is bounded by its own
+    // timeout / try-catch so a wedged listener can't prevent quit.
+    try { await shutdownDlna(); } catch (err: any) {
+      process.stdout.write(`[shutdown] DLNA teardown error: ${err?.message ?? err}\n`);
+    }
+    try { await stopMediaServer(); } catch (err: any) {
+      process.stdout.write(`[shutdown] media server close error: ${err?.message ?? err}\n`);
+    }
+    try { unregisterMediaKeys(); } catch { /* globalShortcut.unregisterAll is forgiving */ }
+
+    // app.exit() rather than app.quit() here — we've already accepted
+    // the close intent and done our cleanup. quit() would re-enter the
+    // before-quit cycle and the `quitInProgress` guard would block it,
+    // but exit() forces immediate termination which is what we want
+    // for auto-update to proceed.
+    app.exit(0);
   })();
 });

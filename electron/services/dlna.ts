@@ -585,6 +585,67 @@ export function setReceiverState(state: Partial<typeof receiverState>): void {
   receiverState = { ...receiverState, ...state };
 }
 
+/**
+ * Tear down everything this module owns:
+ *   - SSDP client (discovery)
+ *   - SSDP server (our MediaRenderer advertisement)
+ *   - Receiver HTTP server (device.xml + SOAP endpoints)
+ *   - Active device status poll timer
+ *
+ * Called from main.ts's before-quit handler. Each step swallows errors
+ * so one broken socket can't block the quit path — we're tearing down
+ * anyway. Critical for Windows auto-update: leftover sockets hold file
+ * handles on node_modules/*.node, which blocks the uninstaller and
+ * leaves the user stuck on the old version.
+ */
+export async function shutdownDlna(): Promise<void> {
+  // Stop the active-device status poll first so it can't fire mid-
+  // teardown and try to poke a socket we just closed.
+  stopStatusPolling();
+  activeDeviceId = null;
+
+  // SSDP discovery client. node-ssdp's stop() is sync but can throw on
+  // already-closed sockets under some Node versions.
+  try { ssdpClient?.stop?.(); } catch { /* noop */ }
+  ssdpClient = null;
+
+  // SSDP server (our receiver's LAN advertisement). Stop emits final
+  // byebye NOTIFY packets so well-behaved senders drop us from their
+  // device lists immediately instead of timing out.
+  try {
+    if (ssdpServer) {
+      await new Promise<void>((resolve) => {
+        try { ssdpServer.stop(() => resolve()); }
+        catch { resolve(); }
+      });
+    }
+  } catch { /* noop */ }
+  ssdpServer = null;
+
+  // Receiver HTTP server — explicit close so any in-flight SOAP
+  // responses drain cleanly. Wrapped in a timeout so a stuck client
+  // can't hold us here forever.
+  try {
+    if (receiverServer) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 1500);
+        try {
+          receiverServer!.close(() => {
+            clearTimeout(timer);
+            resolve();
+          });
+        } catch {
+          clearTimeout(timer);
+          resolve();
+        }
+      });
+    }
+  } catch { /* noop */ }
+  receiverServer = null;
+
+  process.stdout.write('[dlna] shutdown complete\n');
+}
+
 export async function startDlnaReceiver(friendlyName?: string): Promise<void> {
   if (receiverServer) return;
   if (friendlyName) receiverFriendlyName = friendlyName;
