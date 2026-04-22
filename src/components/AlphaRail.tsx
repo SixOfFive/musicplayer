@@ -70,29 +70,55 @@ export default function AlphaRail({ items, labelOf, emptyLabel }: Props) {
     // Grab every element under this letter in DOM order — the list is
     // sorted, so DOM order is the same as alphabetical order within
     // the letter group.
-    const all = document.querySelectorAll(`[data-alpha-letter="${letter}"]`);
+    const all = Array.from(document.querySelectorAll(`[data-alpha-letter="${letter}"]`)) as HTMLElement[];
     if (all.length === 0) return;
 
-    // Pick the index: reset to 0 on letter change, otherwise advance
-    // and wrap. Wrapping (instead of clamping) gives a natural "keep
-    // pressing to explore everything under this letter" feel rather
-    // than silently dead-ending on the last item.
+    // GRID-AWARE ROW BUCKETING
+    // ------------------------
+    // Artists is a vertical list, one item per row. Albums is a
+    // 6-column grid — items 1, 2, 3, 4, 5, 6 in an A section all sit
+    // in the same row at the same Y coordinate. Advancing "one item"
+    // on repeat clicks would walk sideways across a row, which reads
+    // to the user as "the scroll bar didn't move."
+    //
+    // Instead, bucket by distinct row-top. One representative per row.
+    // First click: row 0 of the letter's section. Second click: row 1.
+    // Third click: row 2. Etc. On lists (Artists), "one item = one
+    // row" so behaviour is identical to the old code.
+    //
+    // Tolerance of 4px absorbs sub-pixel rendering noise; items
+    // whose tops are within 4px of the previous one are considered
+    // in the same row.
+    const rows: HTMLElement[] = [];
+    let lastY = -Infinity;
+    for (const el of all) {
+      const y = el.getBoundingClientRect().top;
+      if (Math.abs(y - lastY) > 4) {
+        rows.push(el);
+        lastY = y;
+      }
+    }
+    const rowCount = rows.length;
+
+    // Pick the row index: reset to 0 on letter change, otherwise
+    // advance and wrap. Wrapping (rather than clamping) gives a
+    // natural "keep tapping to browse all of A" feel.
     let idx: number;
     if (lastLetterRef.current !== letter) {
       idx = 0;
     } else {
-      idx = (letterIndexRef.current + 1) % all.length;
+      idx = (letterIndexRef.current + 1) % rowCount;
     }
     lastLetterRef.current = letter;
     letterIndexRef.current = idx;
 
-    const el = all[idx] as HTMLElement;
+    const el = rows[idx];
 
     // Explicit scroll computation rather than `el.scrollIntoView()`.
-    // scrollIntoView's smooth-animation path is inconsistent when
-    // called repeatedly in quick succession (clicks mid-flight can
-    // land off-target); computing scrollTop ourselves keeps the final
-    // position deterministic + gives us control over the top offset.
+    // scrollIntoView's smooth path is inconsistent when called
+    // repeatedly in quick succession (clicks mid-flight land off-
+    // target); computing scrollTop ourselves keeps the final
+    // position deterministic + gives control over the top offset.
     let scroller: HTMLElement | null = el.parentElement;
     while (scroller) {
       const style = getComputedStyle(scroller);
@@ -101,13 +127,33 @@ export default function AlphaRail({ items, labelOf, emptyLabel }: Props) {
       scroller = scroller.parentElement;
     }
     if (!scroller) scroller = (document.scrollingElement ?? document.documentElement) as HTMLElement;
+    const sc = scroller;
 
-    const elRect = el.getBoundingClientRect();
-    const scRect = scroller.getBoundingClientRect();
-    // 8px of breathing room above the target so it isn't flush against
-    // the viewport edge / any floating chrome above.
-    const target = scroller.scrollTop + (elRect.top - scRect.top) - 8;
-    scroller.scrollTo({ top: Math.max(0, target), behavior: 'smooth' });
+    // Scroll in THREE passes to defeat lazy-loaded image layout shifts:
+    //
+    //   1. Immediate instant scroll  — gets us close and triggers the
+    //      lazy images in the now-visible band to start loading.
+    //   2. rAF × 2 correction        — after the browser's next layout
+    //      pass, images below may have consumed space and pushed our
+    //      target down a few pixels; re-snap.
+    //   3. 300ms correction          — covers lazy images that actually
+    //      decoded during the first two frames.
+    //
+    // Instant (behavior: 'auto') rather than smooth because the smooth
+    // animation + lazy-image shifts + subsequent scrollTo calls all
+    // fighting each other produces visible jank. Instant + 3 snaps
+    // feels crisp and always lands exactly on target.
+    const scrollToEl = () => {
+      const elRect = el.getBoundingClientRect();
+      const scRect = sc.getBoundingClientRect();
+      // 8px of breathing room above the target so it isn't flush against
+      // the viewport edge / any floating chrome above.
+      const target = sc.scrollTop + (elRect.top - scRect.top) - 8;
+      sc.scrollTo({ top: Math.max(0, target), behavior: 'auto' });
+    };
+    scrollToEl();
+    requestAnimationFrame(() => requestAnimationFrame(scrollToEl));
+    setTimeout(scrollToEl, 300);
   }
 
   return (
