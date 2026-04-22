@@ -26,30 +26,51 @@ const LIKED_FILENAME = 'Liked Songs';
 async function resolveExportDir(): Promise<string> {
   const settings = getSettings();
   const explicit = settings.playlistExport?.folder?.trim();
-  const candidates: string[] = [];
-  // User's explicit pick — used exactly as provided. No Playlists
-  // subfolder magic; absolute path in, same path out.
-  if (explicit) candidates.push(explicit);
 
-  // Fallback when nothing's configured: an app-local subfolder under
-  // userData. NOT under the music library — writing there mixes
-  // playlists with audio and made users think the app was silently
-  // bolting "Playlists" onto whatever folder they picked.
-  candidates.push(path.join(app.getPath('userData'), 'Playlists'));
-
-  for (const dir of candidates) {
+  if (explicit) {
+    // Explicit pick — use it LITERALLY. No subfolder append, no
+    // silent fallback to userData when the share is briefly
+    // unreachable. Previous behaviour probe-wrote a throwaway file
+    // before every export + quietly redirected to userData/Playlists
+    // on failure, which on a slow SMB share meant: (a) two extra
+    // round-trips per export that the user could feel as UI lag, and
+    // (b) writes ending up in two different locations without the
+    // user noticing. Now: mkdir the folder (idempotent), return, and
+    // let the actual fs.writeFile in exportPlaylist throw if the
+    // share is down. That error bubbles up to the UI where the user
+    // can act on it.
     try {
-      await fs.mkdir(dir, { recursive: true });
-      // Probe writability.
-      const probe = path.join(dir, '.mp-write-probe');
-      await fs.writeFile(probe, '');
-      await fs.unlink(probe);
-      return dir;
-    } catch {
-      /* try next */
+      await fs.mkdir(explicit, { recursive: true });
+      return explicit;
+    } catch (err: any) {
+      throw new Error(`Playlist export folder "${explicit}" isn't writable: ${err?.message ?? err}`);
     }
   }
-  throw new Error('No writable playlist export directory found');
+
+  // No explicit folder — use the app's private data dir. This is
+  // the ONLY fallback path, and only applies when the user never
+  // picked a folder. Never used as a "safety net" when an explicit
+  // pick fails.
+  const fallback = path.join(app.getPath('userData'), 'Playlists');
+  await fs.mkdir(fallback, { recursive: true });
+  return fallback;
+}
+
+/**
+ * Returns whatever path the app is CURRENTLY writing playlist files
+ * to, without touching the filesystem. Surfaced in the settings UI so
+ * the user can see where their exports actually go — especially
+ * useful if their explicit share is unreachable and writes are
+ * erroring out. Returns null on config error (never throws).
+ */
+export function getEffectiveExportDir(): string | null {
+  try {
+    const explicit = getSettings().playlistExport?.folder?.trim();
+    if (explicit) return explicit;
+    return path.join(app.getPath('userData'), 'Playlists');
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -129,27 +150,54 @@ function getPlaylistRows(playlistId: number): {
   return { name: pl.name, description: pl.description, tracks: rows };
 }
 
+/** Last error encountered while trying to export a playlist. Surfaced
+ *  to the renderer via the schedule-status IPC so the settings panel
+ *  can display an alert when a flaky network share is dropping writes.
+ *  Cleared on the first successful export. */
+let lastExportError: { message: string; at: number; path: string | null } | null = null;
+
+/** Read-only accessor used by the IPC layer. */
+export function getLastExportError(): { message: string; at: number; path: string | null } | null {
+  return lastExportError;
+}
+export function clearLastExportError(): void { lastExportError = null; }
+
 /**
- * Write (or delete) a single playlist's .m3u8 file.
- * Safe to call from any IPC handler. Failures are logged, not thrown — we
- * never want a disk-write error to break an otherwise-successful DB op.
+ * Write a single playlist's .m3u8 file. Whole file written in one
+ * fs.writeFile call — no line-by-line streaming, no probe-write
+ * before. On a slow network share that alone shaves round-trips.
+ *
+ * Errors are caught so an otherwise-successful DB op doesn't reject
+ * to the renderer, but they're STORED in `lastExportError` so the
+ * UI can alert. Previous behaviour silently swallowed the error
+ * which hid "your share just disconnected" from the user.
  */
 export async function exportPlaylist(playlistId: number, _oldNameIfRenamed?: string | null): Promise<void> {
+  const settings = getSettings();
+  if (!settings.playlistExport?.enabled) return;
+  if (playlistId === LIKED_PLAYLIST_ID && !settings.playlistExport.exportLiked) return;
+
+  const data = getPlaylistRows(playlistId);
+  if (!data) return;
+
+  let target: string | null = null;
   try {
-    const settings = getSettings();
-    if (!settings.playlistExport?.enabled) return;
-    if (playlistId === LIKED_PLAYLIST_ID && !settings.playlistExport.exportLiked) return;
-
-    const data = getPlaylistRows(playlistId);
-    if (!data) return;
-
     const dir = await resolveExportDir();
     const filename = sanitizeFilename(data.name) + '.m3u8';
-    const target = path.join(dir, filename);
+    target = path.join(dir, filename);
     const contents = renderM3U(data.tracks, dir, data.description);
+    // Single fs.writeFile. The whole .m3u8 (header + EXTINF + path
+    // lines) is built in memory first and handed over in one call —
+    // on SMB this is dramatically faster than any append-style
+    // approach because the OS can short-circuit the transfer into
+    // one SMB2 WRITE.
     await fs.writeFile(target, contents, 'utf8');
+    // Success — clear any stale error so the UI banner goes away.
+    if (lastExportError) lastExportError = null;
   } catch (err: any) {
-    console.error('[playlist-export] write failed', err?.message ?? err);
+    const message = err?.message ?? String(err);
+    console.error('[playlist-export] write failed', message);
+    lastExportError = { message, at: Date.now(), path: target };
   }
 }
 

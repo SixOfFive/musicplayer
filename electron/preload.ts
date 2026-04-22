@@ -64,6 +64,7 @@ const api = {
     // effective; `flushNow` drains the queue on demand.
     schedStatus: () => ipcRenderer.invoke(IPC.PL_SCHED_STATUS),
     flushNow: () => ipcRenderer.invoke(IPC.PL_SCHED_FLUSH),
+    clearLastError: () => ipcRenderer.invoke('pl:clear-last-error'),
     // Rewrite corrupt .m3u8 files in place — keeps salvageable tracks,
     // drops malformed lines. Called by the Import dialog when the
     // user opts in to fixing a partial-parse file.

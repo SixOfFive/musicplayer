@@ -9,6 +9,9 @@ import {
   dirtyPlaylistCount,
   flushDirtyPlaylists,
   fixCorruptPlaylistFiles,
+  getEffectiveExportDir,
+  getLastExportError,
+  clearLastExportError,
 } from '../services/playlist-export';
 import { getSettings } from '../services/settings-store';
 
@@ -223,8 +226,23 @@ export function registerPlaylistsIpc(ipcMain: IpcMain) {
       autoDetectedMode: s?.autoDetectedMode ?? 'immediate',
       effective,
       pending: dirtyPlaylistCount(),
+      // Effective write location — exactly what the user picked, or
+      // the userData fallback if nothing's set. Surfaced in the
+      // settings panel so the user can verify their playlists are
+      // going where they expect.
+      effectiveDir: getEffectiveExportDir(),
+      // Most recent export failure, if any. Clears automatically on
+      // the next successful write. UI surfaces this so the user sees
+      // "network share dropped mid-export" instead of silently
+      // wondering why some edits didn't persist.
+      lastError: getLastExportError(),
     };
   });
+
+  // Dismiss the export-error banner explicitly. The banner also
+  // self-clears when a subsequent write succeeds; this handler lets
+  // the user acknowledge + hide it even if writes are still failing.
+  ipcMain.handle('pl:clear-last-error', () => { clearLastExportError(); });
 
   // Manual flush — "Save all pending now" button in the settings panel.
   ipcMain.handle(IPC.PL_SCHED_FLUSH, () => flushDirtyPlaylists());

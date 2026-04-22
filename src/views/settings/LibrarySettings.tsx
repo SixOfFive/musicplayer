@@ -378,7 +378,14 @@ function MigrateArtButton() {
  */
 function PlaylistSaveModeControl() {
   const [mode, setMode] = useState<PlaylistSaveMode>('auto');
-  const [status, setStatus] = useState<{ saveMode: PlaylistSaveMode; autoDetectedMode: 'immediate' | 'on-close'; effective: 'immediate' | 'on-close'; pending: number } | null>(null);
+  const [status, setStatus] = useState<{
+    saveMode: PlaylistSaveMode;
+    autoDetectedMode: 'immediate' | 'on-close';
+    effective: 'immediate' | 'on-close';
+    pending: number;
+    effectiveDir: string | null;
+    lastError: { message: string; at: number; path: string | null } | null;
+  } | null>(null);
   const [flushing, setFlushing] = useState(false);
 
   async function refreshStatus() {
@@ -449,28 +456,65 @@ function PlaylistSaveModeControl() {
           can change mid-session. Also shows the pending-queue count
           when we're in on-close mode, with a manual flush button. */}
       {status && (
-        <div className="mt-2 text-xs text-text-muted flex items-center gap-3">
-          <span>
-            Currently saving{' '}
-            <span className="text-text-primary">
-              {status.effective === 'immediate' ? 'immediately' : 'on close'}
+        <div className="mt-2 text-xs text-text-muted space-y-1">
+          <div className="flex items-center gap-3 flex-wrap">
+            <span>
+              Currently saving{' '}
+              <span className="text-text-primary">
+                {status.effective === 'immediate' ? 'immediately' : 'on close'}
+              </span>
+              {status.saveMode === 'auto' && status.effective === 'on-close' && (
+                <> — auto-switched after a slow write</>
+              )}
             </span>
-            {status.saveMode === 'auto' && status.effective === 'on-close' && (
-              <> — auto-switched after a slow write</>
+            {status.pending > 0 && (
+              <>
+                <span className="text-amber-400">{status.pending} edit{status.pending === 1 ? '' : 's'} queued</span>
+                <button
+                  onClick={flushNow}
+                  disabled={flushing}
+                  className="px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 text-[10px] disabled:opacity-50"
+                  title="Write every queued playlist to disk right now"
+                >
+                  {flushing ? 'Saving…' : 'Save now'}
+                </button>
+              </>
             )}
-          </span>
-          {status.pending > 0 && (
-            <>
-              <span className="text-amber-400">{status.pending} edit{status.pending === 1 ? '' : 's'} queued</span>
+          </div>
+          {/* Effective write location. Important when the explicit
+              folder is a network share — the user can see at a glance
+              whether exports are still going there. Falls back to the
+              userData path only when no explicit folder is set (no
+              silent fallback to userData when a share fails; that
+              path now throws loudly instead). */}
+          {status.effectiveDir && (
+            <div className="flex items-start gap-2">
+              <span className="text-text-muted">Writing to:</span>
+              <code className="font-mono text-text-primary text-[11px] break-all">{status.effectiveDir}</code>
+            </div>
+          )}
+          {/* Last export error banner — surfaces network-share
+              disconnects, permission rejections, read-only filesystems.
+              Clears automatically on the next successful write; the
+              dismiss (×) button acknowledges without waiting. */}
+          {status.lastError && (
+            <div className="mt-1 p-2 rounded bg-red-500/10 border border-red-500/30 flex items-start gap-2">
+              <div className="flex-1 text-red-200 text-[11px]">
+                <div className="font-semibold">Playlist export failed</div>
+                <div className="opacity-80 mt-0.5 break-all">{status.lastError.message}</div>
+                {status.lastError.path && (
+                  <div className="mt-0.5 font-mono opacity-60 break-all">while writing {status.lastError.path}</div>
+                )}
+              </div>
               <button
-                onClick={flushNow}
-                disabled={flushing}
-                className="px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 text-[10px] disabled:opacity-50"
-                title="Write every queued playlist to disk right now"
-              >
-                {flushing ? 'Saving…' : 'Save now'}
-              </button>
-            </>
+                onClick={async () => {
+                  await (window.mp.playlists as any).clearLastError();
+                  void refreshStatus();
+                }}
+                className="text-red-200/60 hover:text-red-100 text-xs flex-shrink-0"
+                title="Dismiss"
+              >✕</button>
+            </div>
           )}
         </div>
       )}
