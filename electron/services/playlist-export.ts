@@ -223,7 +223,13 @@ export async function removeExportedPlaylist(name: string): Promise<void> {
  */
 interface ParsedM3U {
   paths: string[];
+  /** Best-guess name: embeddedName if we found a #PLAYLIST: directive,
+   *  otherwise the filename (minus .m3u8 extension). */
   playlistName: string;
+  /** The raw #PLAYLIST: value if present, else null. Surfaced
+   *  separately so the import UI can show "Filename: X, Embedded: Y"
+   *  before the user confirms a name. */
+  embeddedName: string | null;
   /** Non-fatal parsing issues we skipped past — e.g. a line that looks
    *  like a path but pointed nowhere we could resolve, UTF-8 decode
    *  failures on a single row, or an orphan `#EXTINF:` without a
@@ -248,7 +254,14 @@ async function parseM3U(filePath: string): Promise<ParsedM3U> {
   const dir = path.dirname(filePath);
   const paths: string[] = [];
   const skipped: ParsedM3U['skipped'] = [];
-  const playlistName = path.basename(filePath, '.m3u8');
+  // Default to the filename (sans .m3u8) as the playlist name, then
+  // promote to any embedded `#PLAYLIST:<title>` directive we encounter
+  // — that's the extended-M3U convention some tools (Winamp,
+  // foobar2000) write. Exposing both lets the import UI pre-fill the
+  // name field with the richer value while still letting the user
+  // edit it to whatever they want.
+  let playlistName = path.basename(filePath, '.m3u8');
+  let embeddedName: string | null = null;
 
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i];
@@ -258,7 +271,16 @@ async function parseM3U(filePath: string): Promise<ParsedM3U> {
     // etc. Silently skip directives; if the line starts with # but
     // doesn't look like one of ours, still skip (other tools embed
     // custom extensions like #EXTGRP, #EXTVLCOPT, etc.).
-    if (trimmed.startsWith('#')) continue;
+    if (trimmed.startsWith('#')) {
+      // Capture #PLAYLIST: title if present. Case-insensitive match
+      // since some tools write #Playlist: or similar.
+      const m = /^#PLAYLIST\s*:\s*(.+)$/i.exec(trimmed);
+      if (m && m[1]) {
+        const name = m[1].trim();
+        if (name) { embeddedName = name; playlistName = name; }
+      }
+      continue;
+    }
 
     // Ban absurdly-long "paths" (> 4 KB) and anything containing
     // non-printable junk — these are the giveaway that a file got
@@ -282,7 +304,7 @@ async function parseM3U(filePath: string): Promise<ParsedM3U> {
       skipped.push({ lineNo: i + 1, raw: trimmed, reason: `path resolution failed: ${err?.message ?? err}` });
     }
   }
-  return { paths, playlistName, skipped };
+  return { paths, playlistName, embeddedName, skipped };
 }
 
 /**

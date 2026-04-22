@@ -274,21 +274,42 @@ export async function applyUpdate(): Promise<ApplyUpdateResult> {
   }
   const settings = getSettings();
   const { branch } = settings.update;
+
+  // The old code refused to update when the working tree was dirty,
+  // which meant a user running from source could get stuck if the
+  // app itself (or a package-lock churn from `npm install` during a
+  // prior update, or a build artifact escaping .gitignore) wrote
+  // into the tree. User asked for unconditional override: clicking
+  // "Update" means "bring me to origin, discard whatever's in the
+  // way."
+  //
+  // Safety net: before the reset, stash any dirty state (including
+  // untracked files with `-u`) with a timestamped message. If nothing
+  // is dirty, `git stash push` exits non-zero and we ignore — the
+  // reset below is harmless on a clean tree. If something WAS
+  // stashed, the user can recover with `git stash list` + `git
+  // stash pop` from the project directory.
   const dirty = await isDirty();
   if (dirty) {
-    return {
-      ok: false, needsRestart: false, newSha: null, pulledCommits: 0,
-      message: 'Working tree has uncommitted changes. Commit or stash them, then try again.',
-    };
+    process.stdout.write('[updater] working tree dirty — stashing before reset\n');
+    try {
+      await exec('git', ['stash', 'push', '-u', '-m', `auto-stash from updater ${new Date().toISOString()}`], { cwd: projectRoot() });
+    } catch { /* nothing to stash, or stash disabled — proceed to reset anyway */ }
   }
+
   const beforeSha = await readLocalSha();
   try {
+    // Fetch first, then hard-reset to origin's tip. `git reset --hard
+    // origin/<branch>` replaces the `git pull --ff-only` that refused
+    // on a dirty tree — this version rewrites tracked files to
+    // match origin verbatim, leaves untracked files alone, and
+    // never fails on local modifications.
     await exec('git', ['fetch', 'origin', branch], { cwd: projectRoot() });
-    await exec('git', ['pull', '--ff-only', 'origin', branch], { cwd: projectRoot() });
+    await exec('git', ['reset', '--hard', `origin/${branch}`], { cwd: projectRoot() });
   } catch (err: any) {
     return {
       ok: false, needsRestart: false, newSha: null, pulledCommits: 0,
-      message: `Pull failed: ${err?.stderr?.toString?.() ?? err?.message ?? err}`.trim(),
+      message: `Update failed: ${err?.stderr?.toString?.() ?? err?.message ?? err}`.trim(),
     };
   }
   const afterSha = await readLocalSha();
