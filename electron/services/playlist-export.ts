@@ -614,6 +614,263 @@ export function dirtyPlaylistCount(): number {
   return dirtyWriteIds.size + dirtyDeleteNames.size;
 }
 
+// ----------------------------------------------------------------------------
+// Manual Save Now / Load Now — single-playlist variants
+// ----------------------------------------------------------------------------
+//
+// Regular export/import works on the WHOLE folder of playlists. The
+// PlaylistView "Save Now" / "Load Now" buttons drive this narrower
+// surface: one playlist at a time, with explicit merge-or-overwrite
+// semantics instead of the "skip existing" default of the folder
+// importer. Liked Songs is treated like any other playlist here —
+// its file is `Liked Songs.m3u8`, and tracks round-trip through the
+// track_likes table instead of playlist_tracks.
+
+/**
+ * Peek at where a playlist's file WOULD be written and whether it
+ * already exists. Used by the UI to decide whether to prompt the
+ * user for a merge/overwrite decision before calling savePlaylistNow.
+ * Never throws — on config error returns `{ exists: false, path: '' }`.
+ */
+export async function peekPlaylistFile(playlistId: number): Promise<{
+  exists: boolean;
+  path: string;
+  existingTrackCount: number | null;
+}> {
+  try {
+    const data = getPlaylistRows(playlistId);
+    if (!data) return { exists: false, path: '', existingTrackCount: null };
+    const dir = await resolveExportDir();
+    const filePath = path.join(dir, sanitizeFilename(data.name) + '.m3u8');
+    try {
+      await fs.access(filePath);
+    } catch {
+      return { exists: false, path: filePath, existingTrackCount: null };
+    }
+    // File is there — read it and count salvageable paths so the UI
+    // can show "merge with 42 tracks on disk" or similar.
+    try {
+      const parsed = await parseM3U(filePath);
+      return { exists: true, path: filePath, existingTrackCount: parsed.paths.length };
+    } catch {
+      return { exists: true, path: filePath, existingTrackCount: null };
+    }
+  } catch (err: any) {
+    process.stdout.write(`[playlist-export] peek failed: ${err?.message ?? err}\n`);
+    return { exists: false, path: '', existingTrackCount: null };
+  }
+}
+
+/**
+ * Force-write a single playlist to disk, bypassing the scheduler.
+ *
+ *   mode = 'overwrite'  — same as regular export: DB → file, clobber.
+ *   mode = 'merge'      — read the existing file, union its paths
+ *                          with the current DB track list, de-dupe by
+ *                          normalized path, write the result back.
+ *                          Order: DB tracks first (in their DB order),
+ *                          then any extra paths from the file that
+ *                          weren't already in the DB playlist.
+ *
+ * For manual playlists, merge also INSERTS any disk-only tracks back
+ * into the DB playlist so in-app state matches what's on disk after
+ * the merge. For Liked Songs, disk-only tracks get a fresh row in
+ * track_likes.
+ *
+ * Returns counts so the UI can show "merged 27 tracks + 5 from disk → 32 saved".
+ */
+export async function savePlaylistNow(
+  playlistId: number,
+  mode: 'overwrite' | 'merge',
+): Promise<{ ok: boolean; written: number; addedFromDisk: number; path: string; message: string }> {
+  const data = getPlaylistRows(playlistId);
+  if (!data) return { ok: false, written: 0, addedFromDisk: 0, path: '', message: 'Playlist not found.' };
+
+  let target = '';
+  try {
+    const dir = await resolveExportDir();
+    target = path.join(dir, sanitizeFilename(data.name) + '.m3u8');
+
+    let finalTracks = data.tracks;
+    let addedFromDisk = 0;
+
+    if (mode === 'merge') {
+      // Read the on-disk file (if any), union with DB tracks, de-dupe.
+      try {
+        await fs.access(target);
+        const parsed = await parseM3U(target);
+        const knownPaths = new Set(data.tracks.map((t) => path.normalize(t.path).toLowerCase()));
+        const extraPaths: string[] = [];
+        for (const p of parsed.paths) {
+          const norm = path.normalize(p).toLowerCase();
+          if (!knownPaths.has(norm)) {
+            knownPaths.add(norm);
+            extraPaths.push(p);
+          }
+        }
+        if (extraPaths.length > 0) {
+          // Look up the DB row for each extra path so we can both
+          // render them into the .m3u8 with proper EXTINF lines AND
+          // add them to the DB playlist (or track_likes) for consistency.
+          const db = getDb();
+          const findStmt = db.prepare(`
+            SELECT t.id, t.path, t.duration_sec AS durationSec, t.title, ar.name AS artist
+            FROM tracks t
+            LEFT JOIN artists ar ON ar.id = t.artist_id
+            WHERE t.path = ? OR LOWER(t.path) = LOWER(?)
+            LIMIT 1
+          `);
+          const extraRows: Array<{ id: number; path: string; durationSec: number | null; title: string; artist: string | null }> = [];
+          for (const p of extraPaths) {
+            const row = findStmt.get(p, p) as any;
+            if (row) extraRows.push(row);
+          }
+
+          if (extraRows.length > 0) {
+            // Add to DB playlist / likes so UI reflects the merged state.
+            if (playlistId === LIKED_PLAYLIST_ID) {
+              const now = Date.now();
+              const ins = db.prepare('INSERT OR IGNORE INTO track_likes (track_id, liked_at) VALUES (?, ?)');
+              const tx = db.transaction((ids: number[]) => { for (const tid of ids) ins.run(tid, now); });
+              tx(extraRows.map((r) => r.id));
+            } else {
+              const now = Date.now();
+              const maxRow = db.prepare('SELECT COALESCE(MAX(position), -1) AS m FROM playlist_tracks WHERE playlist_id = ?')
+                .get(playlistId) as { m: number };
+              let pos = maxRow.m + 1;
+              const ins = db.prepare('INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position, added_at) VALUES (?, ?, ?, ?)');
+              const tx = db.transaction(() => {
+                for (const r of extraRows) ins.run(playlistId, r.id, pos++, now);
+                db.prepare('UPDATE playlists SET updated_at = ? WHERE id = ?').run(now, playlistId);
+              });
+              tx();
+            }
+            addedFromDisk = extraRows.length;
+            finalTracks = [
+              ...data.tracks,
+              ...extraRows.map((r) => ({ path: r.path, durationSec: r.durationSec, title: r.title, artist: r.artist })),
+            ];
+          }
+        }
+      } catch { /* file doesn't exist — merge degrades to overwrite */ }
+    }
+
+    const contents = renderM3U(finalTracks, path.dirname(target), data.description);
+    await fs.writeFile(target, contents, 'utf8');
+    if (lastExportError) lastExportError = null;
+    return {
+      ok: true,
+      written: finalTracks.length,
+      addedFromDisk,
+      path: target,
+      message: mode === 'merge' && addedFromDisk > 0
+        ? `Merged ${data.tracks.length} + ${addedFromDisk} from disk → ${finalTracks.length} tracks saved.`
+        : `Saved ${finalTracks.length} tracks.`,
+    };
+  } catch (err: any) {
+    const message = err?.message ?? String(err);
+    lastExportError = { message, at: Date.now(), path: target || null };
+    return { ok: false, written: 0, addedFromDisk: 0, path: target, message: `Save failed: ${message}` };
+  }
+}
+
+/**
+ * Force-load a single playlist FROM disk into the DB, de-duped against
+ * what's already in the DB. Opposite direction of savePlaylistNow.
+ *
+ * Use case: user edited the .m3u8 in another tool (MusicBee on another
+ * machine, hand-edit in a text editor), wants those additions reflected
+ * here without waiting for startup auto-import.
+ *
+ * De-dupe: a track already in the DB playlist is skipped (not
+ * re-added). A path whose DB track row doesn't exist (file not in the
+ * library) is counted as `missing` and reported back so the UI can
+ * show "3 paths skipped — files not in your library yet".
+ */
+export async function loadPlaylistNow(playlistId: number): Promise<{
+  ok: boolean;
+  added: number;
+  skipped: number;
+  missing: number;
+  path: string;
+  message: string;
+}> {
+  const data = getPlaylistRows(playlistId);
+  if (!data) return { ok: false, added: 0, skipped: 0, missing: 0, path: '', message: 'Playlist not found.' };
+
+  let target = '';
+  try {
+    const dir = await resolveExportDir();
+    target = path.join(dir, sanitizeFilename(data.name) + '.m3u8');
+    try { await fs.access(target); }
+    catch {
+      return { ok: false, added: 0, skipped: 0, missing: 0, path: target, message: `No file on disk at ${target}` };
+    }
+
+    const parsed = await parseM3U(target);
+    if (parsed.paths.length === 0) {
+      return { ok: true, added: 0, skipped: 0, missing: 0, path: target, message: 'File on disk has no valid tracks.' };
+    }
+
+    const db = getDb();
+    // Build the set of track IDs already in this playlist so we skip them.
+    const existingIds = new Set<number>();
+    if (playlistId === LIKED_PLAYLIST_ID) {
+      (db.prepare('SELECT track_id FROM track_likes').all() as Array<{ track_id: number }>)
+        .forEach((r) => existingIds.add(r.track_id));
+    } else {
+      (db.prepare('SELECT track_id FROM playlist_tracks WHERE playlist_id = ?').all(playlistId) as Array<{ track_id: number }>)
+        .forEach((r) => existingIds.add(r.track_id));
+    }
+
+    const findStmt = db.prepare('SELECT id FROM tracks WHERE path = ?');
+    const findCi = db.prepare('SELECT id FROM tracks WHERE LOWER(path) = LOWER(?)');
+    const toAdd: number[] = [];
+    let skipped = 0;
+    let missing = 0;
+    for (const p of parsed.paths) {
+      const row = (findStmt.get(p) as { id: number } | undefined) ?? (findCi.get(p) as { id: number } | undefined);
+      if (!row) { missing++; continue; }
+      if (existingIds.has(row.id)) { skipped++; continue; }
+      existingIds.add(row.id);
+      toAdd.push(row.id);
+    }
+
+    if (toAdd.length > 0) {
+      const now = Date.now();
+      if (playlistId === LIKED_PLAYLIST_ID) {
+        const ins = db.prepare('INSERT OR IGNORE INTO track_likes (track_id, liked_at) VALUES (?, ?)');
+        const tx = db.transaction((ids: number[]) => { for (const tid of ids) ins.run(tid, now); });
+        tx(toAdd);
+      } else {
+        const maxRow = db.prepare('SELECT COALESCE(MAX(position), -1) AS m FROM playlist_tracks WHERE playlist_id = ?')
+          .get(playlistId) as { m: number };
+        let pos = maxRow.m + 1;
+        const ins = db.prepare('INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position, added_at) VALUES (?, ?, ?, ?)');
+        const tx = db.transaction(() => {
+          for (const tid of toAdd) ins.run(playlistId, tid, pos++, now);
+          db.prepare('UPDATE playlists SET updated_at = ? WHERE id = ?').run(now, playlistId);
+        });
+        tx();
+      }
+    }
+
+    const msgParts: string[] = [`Added ${toAdd.length}`];
+    if (skipped > 0) msgParts.push(`skipped ${skipped} already in playlist`);
+    if (missing > 0) msgParts.push(`${missing} path${missing === 1 ? '' : 's'} not in library`);
+    return {
+      ok: true,
+      added: toAdd.length,
+      skipped,
+      missing,
+      path: target,
+      message: msgParts.join(', ') + '.',
+    };
+  } catch (err: any) {
+    return { ok: false, added: 0, skipped: 0, missing: 0, path: target, message: `Load failed: ${err?.message ?? err}` };
+  }
+}
+
 /** Export every playlist + liked. Used on settings change and manual "re-export all". */
 export async function exportAllPlaylists(): Promise<{ count: number; dir: string }> {
   const settings = getSettings();

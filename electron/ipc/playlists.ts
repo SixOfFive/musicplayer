@@ -12,6 +12,9 @@ import {
   getEffectiveExportDir,
   getLastExportError,
   clearLastExportError,
+  peekPlaylistFile,
+  savePlaylistNow,
+  loadPlaylistNow,
 } from '../services/playlist-export';
 import { getSettings } from '../services/settings-store';
 
@@ -256,4 +259,15 @@ export function registerPlaylistsIpc(ipcMain: IpcMain) {
     if (!Array.isArray(absPaths) || absPaths.length === 0) return { fixed: 0, errors: [] };
     return fixCorruptPlaylistFiles(absPaths);
   });
+
+  // PlaylistView "Save Now" / "Load Now" buttons — per-playlist manual
+  // disk I/O with explicit merge-vs-overwrite semantics. Peek is a
+  // read-only check: the UI calls it to decide whether to show the
+  // merge prompt before committing to a save. Save and Load both
+  // bypass the scheduler entirely (immediate even when saveMode is
+  // on-close — the whole point of the button is "now").
+  ipcMain.handle('pl:save-now-peek', (_e, id: number) => peekPlaylistFile(Number(id)));
+  ipcMain.handle('pl:save-now', (_e, id: number, mode: 'overwrite' | 'merge') =>
+    savePlaylistNow(Number(id), mode === 'merge' ? 'merge' : 'overwrite'));
+  ipcMain.handle('pl:load-now', (_e, id: number) => loadPlaylistNow(Number(id)));
 }

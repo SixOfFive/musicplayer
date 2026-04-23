@@ -69,6 +69,14 @@ const api = {
     // drops malformed lines. Called by the Import dialog when the
     // user opts in to fixing a partial-parse file.
     fixCorrupt: (absPaths: string[]) => ipcRenderer.invoke(IPC.PL_FIX_CORRUPT, absPaths),
+    // Per-playlist Save Now / Load Now (bypasses the scheduler).
+    // saveNowPeek: check whether the .m3u8 exists on disk already,
+    //              so the UI can show a merge-vs-overwrite prompt.
+    // saveNow:    force write {mode: 'overwrite' | 'merge'}.
+    // loadNow:    pull tracks from disk into the playlist, de-duped.
+    saveNowPeek: (id: number) => ipcRenderer.invoke('pl:save-now-peek', id),
+    saveNow: (id: number, mode: 'overwrite' | 'merge') => ipcRenderer.invoke('pl:save-now', id, mode),
+    loadNow: (id: number) => ipcRenderer.invoke('pl:load-now', id),
     // Copy every liked track's AUDIO FILE into <dest>/<Artist>/<file>.
     // Interactive: main sends conflict / error prompt events while the
     // copy runs, renderer replies via `copyLikedDecide`. See
