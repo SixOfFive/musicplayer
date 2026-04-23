@@ -346,24 +346,33 @@ export async function applyUpdate(): Promise<ApplyUpdateResult> {
     }
   }
 
-  // Source-install auto-relaunch: if we actually pulled new code, just
-  // restart the app immediately. No "Reload to load them" button, no
-  // user click needed — clicking "Update" (or the auto-apply in the
-  // banner) means "get me to origin and back up running on the new
-  // version, end of story." The small setTimeout lets this IPC handler
-  // return first so the banner can render "Updating…" for a blink,
-  // then the Electron process relaunches into itself.
-  if (pulledCommits > 0) {
-    process.stdout.write(`[updater] restart after source update (+${pulledCommits} commit${pulledCommits === 1 ? '' : 's'}${ranNpmInstall ? ', npm install ran' : ''})\n`);
-    setTimeout(() => {
-      try {
-        app.relaunch();
-        app.exit(0);
-      } catch (err: any) {
-        process.stdout.write(`[updater] relaunch failed: ${err?.message ?? err}\n`);
-      }
-    }, 500);
-  }
+  // Source-install auto-relaunch. The git reset above succeeded, so
+  // whatever version we're running in this process image is stale.
+  // Exit unconditionally so the wrapper script (run.sh / run.bat)
+  // can re-launch us.
+  //
+  // Exit code 42 is the "please restart me" signal. run.sh loops
+  // back to another `npm run electron:dev` on 42; any other code
+  // (0 = normal close, 1 = crash, 130 = Ctrl-C) means stop.
+  //
+  // Why unconditional: a previous version of this code only fired
+  // the relaunch path when `pulledCommits > 0`. When the RENDERER
+  // is HMR'd to a newer auto-apply banner but the MAIN process is
+  // still the old compiled code, the old code's branch wouldn't
+  // fire and the user got stuck with "Restart to load them." sitting
+  // in the banner with no way to act on it. Now: reset succeeded,
+  // so we exit. Always. Fresh process picks up whatever's on disk.
+  //
+  // app.relaunch() tells Electron to spawn a new instance with the
+  // same argv once we exit — works in packaged builds but is a no-op
+  // or flaky under `electron .` dev mode. That's fine: run.sh's
+  // while-42 loop is the actual restart mechanism on source installs;
+  // relaunch() is just belt-and-suspenders for direct electron runs.
+  process.stdout.write(`[updater] restart after source update (+${pulledCommits} commit${pulledCommits === 1 ? '' : 's'}${ranNpmInstall ? ', npm install ran' : ''})\n`);
+  setTimeout(() => {
+    try { app.relaunch(); } catch { /* noop */ }
+    try { app.exit(42); } catch { process.exit(42); }
+  }, 500);
 
   return {
     ok: true,

@@ -79,6 +79,30 @@ echo ======================================================================
 echo  Starting MusicPlayer (Vite + Electron)...
 echo  Close this window or press Ctrl+C to stop.
 echo ======================================================================
+
+REM Exit code 42 is the updater's "restart me" signal — after a
+REM successful `git reset --hard origin/<branch>` (+ optional npm
+REM install) the Electron main process exits 42 so we loop back and
+REM spawn a fresh instance on the new code. Any other exit code (0
+REM normal close, 1 crash, 130 Ctrl-C, ...) falls out of the loop.
+:run_loop
 call npm run electron:dev
+set "RC=!ERRORLEVEL!"
+if "!RC!"=="42" (
+    echo ======================================================================
+    echo  Auto-update applied - re-launching...
+    echo ======================================================================
+    REM Re-sync deps if the update bumped package.json (defensive; the
+    REM updater already did this, but cheap to double-check).
+    if exist "package.json" (
+        for /f "delims=" %%R in ('powershell -NoProfile -Command "if (-not (Test-Path node_modules\.package-lock.json) -or (Get-Item package.json).LastWriteTime -gt (Get-Item node_modules\.package-lock.json).LastWriteTime) { 'newer' } else { 'same' }"') do set "PKG_CMP=%%R"
+        if "!PKG_CMP!"=="newer" (
+            echo [deps] package.json is newer than last install - re-syncing before relaunch.
+            call npm install
+        )
+    )
+    goto run_loop
+)
 
 endlocal
+exit /b %RC%

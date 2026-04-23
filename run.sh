@@ -90,8 +90,39 @@ fi
 
 # ---- Launch -----------------------------------------------------------------
 
+# Exit code 42 is the updater's "restart me" signal — after a successful
+# `git reset --hard origin/<branch>` (+ optional npm install) the
+# Electron main process exits 42 so we loop back around here and spawn
+# a fresh instance on the new code. Any other exit code (0 normal close,
+# 1 crash, 130 Ctrl-C, …) falls out of the loop like before.
+#
+# `set -e` at the top of the file would kill us on a non-zero exit from
+# the child — we temporarily relax that for the command itself and
+# re-check the code manually so Ctrl-C / clean quit / crash all propagate
+# the right way.
 say "================================================================"
 say " Starting MusicPlayer (Vite + Electron)…"
 say " Press Ctrl+C to stop."
 say "================================================================"
-exec npm run electron:dev
+
+while true; do
+    set +e
+    npm run electron:dev
+    rc=$?
+    set -e
+    if [ "$rc" -eq 42 ]; then
+        say "================================================================"
+        say " Auto-update applied — re-launching…"
+        say "================================================================"
+        # Re-sync deps if the update bumped package.json (updater already
+        # did this, but a defensive second check costs nothing and catches
+        # the edge case where the updater bailed mid-install).
+        if [ ! -f node_modules/.package-lock.json ] || \
+           [ package.json -nt node_modules/.package-lock.json ]; then
+            info "[deps] package.json is newer than last install — re-syncing before relaunch."
+            npm install
+        fi
+        continue
+    fi
+    exit "$rc"
+done
