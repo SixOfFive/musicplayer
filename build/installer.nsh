@@ -17,11 +17,22 @@
 ; exit is not a failure — we just want a clean slate.
 
 !macro customInit
+  ; Two passes with a 1-second gap between them. The first pass kicks
+  ; everything, the sleep lets Windows actually release the file
+  ; handles on node_modules\*.node (better-sqlite3, ffmpeg-static),
+  ; the second pass catches anything that was still shutting down
+  ; during the first. 500ms wasn't always enough on slower disks —
+  ; users reported silent install failures where MusicPlayer-Setup
+  ; exited cleanly but nothing got replaced.
+  nsExec::Exec 'taskkill /F /IM MusicPlayer.exe /T'
+  Sleep 1000
   nsExec::Exec 'taskkill /F /IM MusicPlayer.exe /T'
   Sleep 500
 !macroend
 
 !macro customUnInit
+  nsExec::Exec 'taskkill /F /IM MusicPlayer.exe /T'
+  Sleep 1000
   nsExec::Exec 'taskkill /F /IM MusicPlayer.exe /T'
   Sleep 500
 !macroend

@@ -111,6 +111,33 @@ export default function UpdateBanner() {
   if (!enabled) return null;
   if (dismissed) return null;
 
+  // Packaged mode: download / install FAILED. The old code silently
+  // swallowed electron-updater errors — if the download hit a 403,
+  // the .exe signature check failed, or the silent NSIS install
+  // rejected a file-in-use, the user saw nothing happen. Now we
+  // surface the exact error + offer a manual download as fallback.
+  if (packaged && auto?.kind === 'error') {
+    const releasesUrl = result?.upstreamUrl ? `${result.upstreamUrl}/releases/latest` : 'https://github.com';
+    return (
+      <div className="bg-red-500/20 border-b border-red-500/40 px-4 py-2 flex items-center gap-3 text-xs">
+        <span className="text-red-200 font-semibold">✗ Auto-update failed</span>
+        {auto.message && (
+          <span className="text-red-100/80 truncate flex-1" title={auto.message}>— {auto.message}</span>
+        )}
+        <button
+          onClick={() => window.open(releasesUrl, '_blank')}
+          className="px-3 py-1 rounded-full bg-yellow-500 hover:bg-yellow-400 text-black font-semibold"
+          title="Open the GitHub releases page to download the installer manually"
+        >Download manually</button>
+        <button
+          onClick={async () => { setAuto(null); await runCheck(); }}
+          className="text-text-muted hover:text-white"
+        >Retry</button>
+        <button onClick={() => setDismissed(true)} className="text-text-muted hover:text-white">✕</button>
+      </div>
+    );
+  }
+
   // Packaged mode: download-progress strip
   if (packaged && auto?.kind === 'progress') {
     const pct = Math.round(auto.percent ?? 0);
@@ -181,6 +208,17 @@ export default function UpdateBanner() {
             className="px-3 py-1 rounded-full bg-yellow-500 hover:bg-yellow-400 disabled:opacity-50 text-black font-semibold"
             title={packaged ? 'Download installer and restart' : 'Fetch + reset to origin (auto-stashes local changes first)'}
           >{busy ? (packaged ? 'Downloading…' : 'Updating…') : 'Update now'}</button>
+          {/* Manual download fallback. Packaged mode only — the source
+              path does `git reset`, which doesn't go through GitHub
+              Releases at all. Saves the user from being stranded when
+              electron-updater has a silent failure. */}
+          {packaged && (
+            <button
+              onClick={() => window.open(`${result.upstreamUrl}/releases/latest`, '_blank')}
+              className="text-text-muted hover:text-white"
+              title="Open the GitHub releases page to download the installer manually"
+            >Download manually</button>
+          )}
           <button
             onClick={() => window.open(result.upstreamUrl, '_blank')}
             className="text-text-muted hover:text-white"

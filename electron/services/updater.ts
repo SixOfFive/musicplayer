@@ -39,12 +39,47 @@ async function getAutoUpdater() {
       mainWindowGetter()?.webContents.send(channel, payload);
     _autoUpdater.autoDownload = true;           // start download as soon as update is detected
     _autoUpdater.autoInstallOnAppQuit = true;   // apply the update when the user next quits
-    _autoUpdater.on('checking-for-update', () => emit('update:auto-event', { kind: 'checking' }));
-    _autoUpdater.on('update-available', (info) => emit('update:auto-event', { kind: 'available', info }));
-    _autoUpdater.on('update-not-available', (info) => emit('update:auto-event', { kind: 'none', info }));
-    _autoUpdater.on('error', (err) => emit('update:auto-event', { kind: 'error', message: err?.message ?? String(err) }));
-    _autoUpdater.on('download-progress', (p) => emit('update:auto-event', { kind: 'progress', percent: p.percent, transferred: p.transferred, total: p.total, bytesPerSecond: p.bytesPerSecond }));
-    _autoUpdater.on('update-downloaded', (info) => emit('update:auto-event', { kind: 'downloaded', info }));
+
+    // Every auto-updater event goes to BOTH the renderer (for UI) and
+    // main-side stdout (for terminal / log diagnosis). When auto-update
+    // fails silently on Windows — and electron-updater has a dozen
+    // ways to do that: SHA mismatch, 403 on asset download, AV
+    // quarantine, NSIS file-in-use — the user couldn't see any of
+    // it until now. These lines will show exactly where the flow died.
+    const log = (s: string) => process.stdout.write(`[auto-updater] ${s}\n`);
+    _autoUpdater.logger = {
+      info: (m: any) => log(`info: ${m}`),
+      warn: (m: any) => log(`warn: ${m}`),
+      error: (m: any) => log(`error: ${m}`),
+      debug: (m: any) => log(`debug: ${m}`),
+    } as any;
+
+    _autoUpdater.on('checking-for-update', () => {
+      log('checking for update');
+      emit('update:auto-event', { kind: 'checking' });
+    });
+    _autoUpdater.on('update-available', (info) => {
+      log(`update-available: v${info?.version} (file=${info?.files?.[0]?.url})`);
+      emit('update:auto-event', { kind: 'available', info });
+    });
+    _autoUpdater.on('update-not-available', (info) => {
+      log(`update-not-available (currently v${info?.version})`);
+      emit('update:auto-event', { kind: 'none', info });
+    });
+    _autoUpdater.on('error', (err) => {
+      log(`ERROR: ${err?.message ?? err}\n${err?.stack ?? ''}`);
+      emit('update:auto-event', { kind: 'error', message: err?.message ?? String(err) });
+    });
+    _autoUpdater.on('download-progress', (p) => {
+      // Progress is high-volume — only log every 10% to keep stdout clean.
+      const pct = Math.round(p.percent ?? 0);
+      if (pct % 10 === 0) log(`download ${pct}% (${Math.round((p.transferred ?? 0) / 1024 / 1024)}MB/${Math.round((p.total ?? 0) / 1024 / 1024)}MB @ ${Math.round((p.bytesPerSecond ?? 0) / 1024)}KB/s)`);
+      emit('update:auto-event', { kind: 'progress', percent: p.percent, transferred: p.transferred, total: p.total, bytesPerSecond: p.bytesPerSecond });
+    });
+    _autoUpdater.on('update-downloaded', (info) => {
+      log(`downloaded: v${info?.version} — ready for quitAndInstall`);
+      emit('update:auto-event', { kind: 'downloaded', info });
+    });
   }
   return _autoUpdater;
 }
@@ -243,11 +278,13 @@ export async function applyUpdate(): Promise<ApplyUpdateResult> {
       // `isUpdaterActive` is `true` only in packaged builds with a valid
       // publish config — guards against misconfig in dev-like scenarios.
       if (!updater.isUpdaterActive()) {
+        process.stdout.write('[auto-updater] isUpdaterActive=false — bailing\n');
         return {
           ok: false, needsRestart: false, newSha: null, pulledCommits: 0,
           message: 'Auto-updater is not available in this build.',
         };
       }
+      process.stdout.write('[auto-updater] calling quitAndInstall(isSilent=true, isForceRunAfter=true)\n');
       // setImmediate so this IPC handler can return before the app quits.
       // Args: (isSilent, isForceRunAfter).
       //   isSilent=true — run the NSIS installer without the UI wizard, so
@@ -260,12 +297,23 @@ export async function applyUpdate(): Promise<ApplyUpdateResult> {
       //     as the last step. Without this, a silent install just exits
       //     and the user sees the app disappear with no indication it
       //     upgraded.
-      setImmediate(() => updater.quitAndInstall(true, true));
+      setImmediate(() => {
+        try {
+          updater.quitAndInstall(true, true);
+        } catch (err: any) {
+          // quitAndInstall throws synchronously when called before the
+          // download completed or when the cached installer is gone.
+          // Log it LOUDLY so the next time this happens there's
+          // something to chase.
+          process.stdout.write(`[auto-updater] quitAndInstall threw: ${err?.message ?? err}\n${err?.stack ?? ''}\n`);
+        }
+      });
       return {
         ok: true, needsRestart: true, newSha: null, pulledCommits: 1,
         message: 'Installing update and restarting…',
       };
     } catch (err: any) {
+      process.stdout.write(`[auto-updater] apply failed: ${err?.message ?? err}\n`);
       return {
         ok: false, needsRestart: false, newSha: null, pulledCommits: 0,
         message: `Auto-update failed: ${err?.message ?? err}`,
