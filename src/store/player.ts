@@ -420,6 +420,26 @@ export const usePlayer = create<PlayerState>((set, get) => {
 
     if (cur) failedTrackIds.add(cur.id);
 
+    // Probe the failed track's file in the background. If it's
+    // genuinely missing AND the library dir it's under is healthy
+    // (not an unmounted SMB share / empty root), main deletes the
+    // DB row + broadcasts. We auto-advance past the dead file below
+    // regardless — the probe just cleans up metadata so the user
+    // doesn't keep seeing the ghost entry in Library / Album views.
+    // Throttled main-side to 1 probe per track per 60s and gated by
+    // the session-wide suspect flag, so a bad mount can't purge the
+    // library just because playback errors spike.
+    if (cur) {
+      (window.mp.library as any).probeTrack?.(cur.id)
+        .then((r: any) => {
+          if (r?.removed) {
+            console.log(`[player] probe-track removed "${r.title}" — file was missing and library dir is healthy`);
+            window.dispatchEvent(new CustomEvent('mp-library-changed'));
+          }
+        })
+        .catch(() => { /* silent — probe is best-effort */ });
+    }
+
     // Find the next queue item we haven't already failed on. Respect
     // repeat-all (wrap around the queue) but never try an ID we just
     // failed, to avoid a tight retry loop.

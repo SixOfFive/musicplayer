@@ -5,6 +5,9 @@ import { IPC, type TrackQuery, type AlbumQuery, type TrackSort, type AlbumSort, 
 import { getDb } from '../services/db';
 import { getSettings } from '../services/settings-store';
 import { migrateCoverArtToAlbumFolders } from '../services/cover-art';
+import { statWithFallback } from '../services/fs-fallback';
+import { isTrackLibraryDirHealthy, isLibrarySuspect } from '../services/library-health';
+import { rescanAlbum } from './scan';
 
 const TRACK_SORT_COL: Record<TrackSort, string> = {
   title: 't.title',
@@ -446,6 +449,108 @@ export function registerLibraryIpc(ipcMain: IpcMain, _getWin: () => BrowserWindo
     const art = getDb().prepare('SELECT cover_art_path FROM albums WHERE id = ?').get(albumId) as { cover_art_path: string | null } | undefined;
     if (art?.cover_art_path) { try { await fs.unlink(art.cover_art_path); } catch { /* ignore */ } }
     return { ok: true, deleted: tracks.length };
+  });
+
+  // ----------------------------------------------------------------------
+  // Health probes — cheap auto-cleanup triggered by playback / album view
+  // ----------------------------------------------------------------------
+  //
+  // `probe-track`: stat a single track's file. If the file is gone AND
+  //   the track's library dir is still reachable+non-empty (per
+  //   isTrackLibraryDirHealthy — which also respects the session-wide
+  //   suspect flag), delete the DB row. Otherwise leave things alone:
+  //   the file might just be behind an unreachable mount, or the
+  //   session is in "library suspect" mode after a bad startup probe.
+  //
+  // `probe-album`: cheap sample-check. Pick ONE track from the album
+  //   at random; stat it. If missing AND the dir is healthy, run a
+  //   full album rescan (which walks the folder, reconciles DB vs
+  //   disk, handles re-encodes / deletions / additions in one pass).
+  //   If the sampled file exists, assume the whole album is fine —
+  //   way cheaper than stat-every-track, catches the "another machine
+  //   re-encoded this album" case since at least one filename will
+  //   have changed.
+  //
+  // Cleanup is throttled so repeated album opens / play retries don't
+  // hammer SMB. A track probed in the last 60s is a no-op; an album
+  // probed in the last 5 minutes is a no-op.
+
+  const recentTrackProbes = new Map<number, number>();  // trackId → last probe ms
+  const recentAlbumProbes = new Map<number, number>();  // albumId → last probe ms
+  const TRACK_PROBE_COOLDOWN_MS = 60 * 1000;
+  const ALBUM_PROBE_COOLDOWN_MS = 5 * 60 * 1000;
+
+  ipcMain.handle('library:probe-track', async (_e, trackId: number) => {
+    if (isLibrarySuspect()) {
+      return { ok: true, removed: false, reason: 'library-suspect' };
+    }
+    const now = Date.now();
+    const last = recentTrackProbes.get(trackId) ?? 0;
+    if (now - last < TRACK_PROBE_COOLDOWN_MS) {
+      return { ok: true, removed: false, reason: 'recent' };
+    }
+    recentTrackProbes.set(trackId, now);
+
+    const row = getDb().prepare('SELECT id, path, title FROM tracks WHERE id = ?').get(trackId) as
+      { id: number; path: string; title: string } | undefined;
+    if (!row) return { ok: true, removed: false, reason: 'not-in-db' };
+
+    try {
+      await statWithFallback(row.path);
+      return { ok: true, removed: false, reason: 'exists' };
+    } catch {
+      const healthy = await isTrackLibraryDirHealthy(row.path);
+      if (!healthy) {
+        return { ok: true, removed: false, reason: 'library-dir-unhealthy' };
+      }
+      getDb().prepare('DELETE FROM tracks WHERE id = ?').run(trackId);
+      process.stdout.write(`[library-health] probe-track removed missing file: ${row.path}\n`);
+      return { ok: true, removed: true, path: row.path, title: row.title };
+    }
+  });
+
+  ipcMain.handle('library:probe-album', async (_e, albumId: number) => {
+    if (isLibrarySuspect()) {
+      return { ok: true, rescanned: false, reason: 'library-suspect' };
+    }
+    const now = Date.now();
+    const last = recentAlbumProbes.get(albumId) ?? 0;
+    if (now - last < ALBUM_PROBE_COOLDOWN_MS) {
+      return { ok: true, rescanned: false, reason: 'recent' };
+    }
+    recentAlbumProbes.set(albumId, now);
+
+    // Pick a random track to sample — one stat, not one per track.
+    // If a re-encode changed every filename this single missing file
+    // will trip the rescan and the whole album gets reconciled.
+    const sample = getDb()
+      .prepare('SELECT path FROM tracks WHERE album_id = ? ORDER BY RANDOM() LIMIT 1')
+      .get(albumId) as { path: string } | undefined;
+    if (!sample) return { ok: true, rescanned: false, reason: 'no-tracks' };
+
+    try {
+      await statWithFallback(sample.path);
+      return { ok: true, rescanned: false, reason: 'sample-exists', sampledPath: sample.path };
+    } catch {
+      const healthy = await isTrackLibraryDirHealthy(sample.path);
+      if (!healthy) {
+        return { ok: true, rescanned: false, reason: 'library-dir-unhealthy' };
+      }
+      process.stdout.write(`[library-health] probe-album sample missing → rescanning album ${albumId}\n`);
+      try {
+        const result = await rescanAlbum(albumId);
+        return {
+          ok: true,
+          rescanned: true,
+          added: result.added ?? 0,
+          removed: result.removed ?? 0,
+          updated: result.updated ?? 0,
+          albumDeleted: result.albumDeleted ?? false,
+        };
+      } catch (err: any) {
+        return { ok: false, rescanned: false, reason: 'rescan-failed', error: err?.message ?? String(err) };
+      }
+    }
   });
 }
 

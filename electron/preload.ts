@@ -27,6 +27,14 @@ const api = {
     migrateCoverArt: () => ipcRenderer.invoke(IPC.LIBRARY_MIGRATE_COVER_ART),
     revealInFolder: (targetPath: string) => ipcRenderer.invoke(IPC.LIBRARY_REVEAL_IN_FOLDER, targetPath),
     fileUrl: (p: string) => ipcRenderer.invoke(IPC.PLAYBACK_FILE_URL, p),
+    // Health probes — fired by AlbumView on mount + by player's error
+    // handler on playback failure. Both are throttled main-side to
+    // avoid re-statting the same file in rapid succession. Return
+    // shapes:
+    //   probeTrack:  { ok, removed, reason, path?, title? }
+    //   probeAlbum:  { ok, rescanned, reason, added?, updated?, removed?, albumDeleted? }
+    probeTrack: (trackId: number) => ipcRenderer.invoke('library:probe-track', trackId),
+    probeAlbum: (albumId: number) => ipcRenderer.invoke('library:probe-album', albumId),
   },
   scan: {
     start: () => ipcRenderer.invoke(IPC.SCAN_START),

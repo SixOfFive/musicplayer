@@ -13,6 +13,7 @@ import { registerVisualizerIpc } from './ipc/visualizer';
 import { registerMetadataIpc } from './ipc/metadata';
 import { registerPlaylistsIpc } from './ipc/playlists';
 import { registerCopyLikedIpc } from './ipc/copy-liked';
+import { probeAllLibraryDirs, setLibrarySuspect } from './services/library-health';
 import { registerStatsIpc } from './ipc/stats';
 import { registerConvertIpc } from './ipc/convert';
 import { registerUpdateIpc } from './ipc/update';
@@ -443,6 +444,63 @@ let imageCacheDir: string | null = null;
 app.whenReady().then(async () => {
   await initSettings();
   await initDatabase();
+
+  // ----- Library health safeguard -------------------------------------
+  //
+  // Probe every enabled library dir. If any is missing or empty, pop
+  // a modal before we even create the main window. User choice:
+  //
+  //   Quit     → app.exit(0). Their mount will be back next time.
+  //   Continue → set the session-wide suspect flag. We still let the
+  //              app launch (music they've played recently may be in
+  //              the image cache and scrobble/Last.fm still works),
+  //              but every auto-cleanup path consults this flag and
+  //              refuses to delete DB rows. Nothing vanishes while
+  //              the share is down.
+  //
+  // Runs BEFORE createWindow() so the user isn't staring at a half-
+  // rendered UI while the dialog fires. Uses showMessageBoxSync so
+  // the startup sequence pauses until they answer.
+  try {
+    const healths = await probeAllLibraryDirs();
+    const bad = healths.filter((h) => !h.exists || !h.nonEmpty);
+    if (bad.length > 0) {
+      const lines = bad.map((h) => {
+        if (!h.exists) return `  • ${h.path}  — UNREACHABLE (mount down?)`;
+        return `  • ${h.path}  — EMPTY (mount swapped?)`;
+      });
+      process.stdout.write(`[library-health] suspect dirs at startup:\n${lines.join('\n')}\n`);
+      const choice = dialog.showMessageBoxSync({
+        type: 'warning',
+        title: 'Music library looks wrong',
+        message: bad.length === 1
+          ? `Your music library folder isn't available or is empty.`
+          : `${bad.length} of your music library folders are unavailable or empty.`,
+        detail:
+          lines.join('\n') +
+          `\n\nThis usually means a network drive / SMB share is offline, or a USB drive isn't plugged in.` +
+          `\n\nChoose Continue to launch anyway — nothing will be automatically removed from your library while the folders look bad. Choose Quit to close the app so you can fix the mount and try again.`,
+        buttons: ['Continue anyway', 'Quit'],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true,
+      });
+      if (choice === 1) {
+        process.stdout.write('[library-health] user chose Quit at startup\n');
+        app.exit(0);
+        return;
+      }
+      setLibrarySuspect(true);
+      process.stdout.write('[library-health] user chose Continue — auto-cleanup DISABLED for this session\n');
+    }
+  } catch (err: any) {
+    // If the probe itself throws (shouldn't — probeLibraryDir is
+    // already try/catch'd), don't block startup. Just log it and
+    // proceed. Suspect flag stays off so auto-cleanup is live;
+    // per-probe healthy check will still guard deletes because it
+    // re-stats the dir at delete time.
+    process.stdout.write(`[library-health] startup probe failed: ${err?.message ?? err}\n`);
+  }
 
   // Rehydrate the cover-art cache from disk before we register the media
   // protocol so the very first render can hit warm memory instead of the

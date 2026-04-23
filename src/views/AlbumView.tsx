@@ -57,6 +57,50 @@ export default function AlbumView() {
   useLibraryRefresh(load);
 
   /**
+   * Cheap auto-health check on album open. Main samples ONE track from
+   * this album on disk. If it's missing (e.g. the album was re-encoded
+   * elsewhere so the extensions changed, or the folder was deleted),
+   * main kicks off a full album rescan that reconciles DB with disk.
+   *
+   * Throttled main-side to one probe per album per 5 minutes so
+   * bouncing between albums doesn't spam SMB. Gated by the session-
+   * wide "library suspect" flag: if startup found a broken mount, no
+   * cleanup runs at all — we'd rather keep stale rows than nuke them
+   * when the files might still exist behind an unreachable share.
+   *
+   * Runs in the background: the initial fetch of tracks happens
+   * in parallel via `load()`. If the rescan finds changes, we
+   * re-invoke `load()` to show them and fire the global library-
+   * changed event so the sidebar counts update too.
+   */
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r: any = await (window.mp.library as any).probeAlbum(aid);
+        if (cancelled) return;
+        if (r?.rescanned) {
+          // Reuse the same result panel that the manual "Rescan album"
+          // button populates so the user sees exactly what changed —
+          // "Automatically rescanned — 3 tracks removed, 12 updated"
+          // rather than a silent refresh they might not notice.
+          setRescan({ running: false, result: {
+            added: r.added ?? 0,
+            updated: r.updated ?? 0,
+            removed: r.removed ?? 0,
+            errors: 0,
+            albumDeleted: !!r.albumDeleted,
+            message: 'Auto-rescan after detecting a missing file.',
+          }});
+          load();
+          window.dispatchEvent(new CustomEvent('mp-library-changed'));
+        }
+      } catch { /* silent — probe is best-effort */ }
+    })();
+    return () => { cancelled = true; };
+  }, [aid, load]);
+
+  /**
    * Re-scan just this album's folder(s): re-read tags on every audio file,
    * pick up new tracks that were dropped in, and remove rows for files that
    * have been deleted. Cheaper than a whole-library scan. Button is in the
