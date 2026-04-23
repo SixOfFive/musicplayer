@@ -89,17 +89,25 @@ else
 fi
 
 # ---- Launch -----------------------------------------------------------------
-
-# Exit code 42 is the updater's "restart me" signal — after a successful
-# `git reset --hard origin/<branch>` (+ optional npm install) the
-# Electron main process exits 42 so we loop back around here and spawn
-# a fresh instance on the new code. Any other exit code (0 normal close,
-# 1 crash, 130 Ctrl-C, …) falls out of the loop like before.
 #
-# `set -e` at the top of the file would kill us on a non-zero exit from
-# the child — we temporarily relax that for the command itself and
-# re-check the code manually so Ctrl-C / clean quit / crash all propagate
+# Two restart triggers, either one sufficient:
+#
+#   1. Exit code 42 — the fast path. Main process calls process.exit(42)
+#      after a successful git reset. If concurrently / npm passes 42
+#      through cleanly, we see it here.
+#
+#   2. Sentinel file .needs-restart — the reliable path. Main writes it
+#      BEFORE calling app.quit(). Exit-code-independent, so concurrently
+#      clamping 42 → 0/1 (which some versions do) can't swallow the
+#      restart intent. Deleted after we act on it.
+#
+# `set -e` at the top would kill us on non-zero exit from the child —
+# relaxed per-iteration so Ctrl-C / crash / clean quit all propagate
 # the right way.
+
+SENTINEL="$SCRIPT_DIR/.needs-restart"
+rm -f "$SENTINEL"  # clear any stale sentinel from a prior crashed session
+
 say "================================================================"
 say " Starting MusicPlayer (Vite + Electron)…"
 say " Press Ctrl+C to stop."
@@ -110,7 +118,21 @@ while true; do
     npm run electron:dev
     rc=$?
     set -e
-    if [ "$rc" -eq 42 ]; then
+
+    # Detect restart intent from either trigger. Sentinel wins if both
+    # are present (it's more reliable); rc==42 covers the case where
+    # the updater couldn't write the sentinel (e.g. read-only FS).
+    restart=0
+    if [ -f "$SENTINEL" ]; then
+        restart=1
+        info "[restart] sentinel file detected"
+        rm -f "$SENTINEL"
+    elif [ "$rc" -eq 42 ]; then
+        restart=1
+        info "[restart] exit code 42 detected"
+    fi
+
+    if [ "$restart" -eq 1 ]; then
         say "================================================================"
         say " Auto-update applied — re-launching…"
         say "================================================================"

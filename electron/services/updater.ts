@@ -432,13 +432,32 @@ export async function applyUpdate(): Promise<ApplyUpdateResult> {
   // Vite and Electron), exit code 42 signals the while-loop to start
   // fresh concurrently → fresh Vite → fresh Electron. One process
   // replaces the other with zero overlap.
-  process.stdout.write(`[updater] source update applied (+${pulledCommits} commit${pulledCommits === 1 ? '' : 's'}${ranNpmInstall ? ', npm install ran' : ''}) — exiting 42 for wrapper-driven restart\n`);
+  process.stdout.write(`[updater] source update applied (+${pulledCommits} commit${pulledCommits === 1 ? '' : 's'}${ranNpmInstall ? ', npm install ran' : ''}) — exiting for wrapper-driven restart\n`);
+
+  // Belt-and-suspenders: drop a sentinel file in the project root
+  // alongside the exit-code-42 signal. The wrapper script checks for
+  // either trigger after `npm run electron:dev` returns.
+  //
+  // Why both: concurrently (our dev-mode launcher) has been observed
+  // to clamp non-standard exit codes — a process.exit(42) sometimes
+  // surfaces as 1 or 0 by the time it bubbles up through npm to the
+  // shell. Exit-code-42 is the fast path when it works; the sentinel
+  // file survives any intermediate process-tree mangling and makes
+  // the restart trigger reliable.
+  try {
+    const sentinel = path.join(projectRoot(), '.needs-restart');
+    fsSync.writeFileSync(sentinel, new Date().toISOString() + '\n', 'utf8');
+    process.stdout.write(`[updater] wrote restart sentinel ${sentinel}\n`);
+  } catch (err: any) {
+    process.stdout.write(`[updater] sentinel write failed (non-fatal): ${err?.message ?? err}\n`);
+  }
+
   setTimeout(() => {
     // Tag the shutdown so both the clean-exit path and the watchdog
-    // path terminate with code 42 (run.sh's "respawn me" signal).
-    // Then trigger app.quit, which fires the before-quit orchestrator
-    // that does all the actual cleanup (ffmpeg kill, socket teardown,
-    // process-group SIGTERM, etc.) before calling process.exit(42).
+    // path terminate with code 42. Then trigger app.quit, which fires
+    // the before-quit orchestrator that does all the actual cleanup
+    // (ffmpeg kill, socket teardown, process-group SIGTERM, etc.)
+    // before calling process.exit(42).
     setShutdownExitCode(42);
     try { app.quit(); } catch { process.exit(42); }
   }, 500);

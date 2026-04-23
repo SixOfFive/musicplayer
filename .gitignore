@@ -19,3 +19,6 @@ vite.config.js
 # Assistant scratch files — never publish. Contains local creds + notes.
 BRAINDUMP.md
 brainstart.md
+# Updater restart sentinel — written by main before exit, consumed by
+# run.sh's while-loop. Ephemeral per restart cycle.
+.needs-restart
