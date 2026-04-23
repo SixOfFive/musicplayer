@@ -21,6 +21,10 @@ export default function Visualizer() {
         listBundledMilkdrop(),
       ]);
       const merged = [...(ipcList as VisualizerPlugin[]), ...milk];
+      // Sort alphabetically by display name, case-insensitive with
+      // natural digit ordering ("2" before "10"). Keeps the picker
+      // browsable now that the list is 400+ entries long.
+      merged.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true }));
       setPlugins(merged);
       const s = await window.mp.settings.get();
       setActiveId(s.visualizer.activePluginId ?? merged[0]?.id ?? null);

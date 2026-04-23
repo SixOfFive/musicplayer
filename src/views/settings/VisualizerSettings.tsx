@@ -18,7 +18,14 @@ export default function VisualizerSettings() {
       window.mp.visualizer.list(),
       listBundledMilkdrop(),
     ]);
-    setPlugins([...(ipc as VisualizerPlugin[]), ...milk]);
+    // Sort alphabetically by name (case-insensitive, natural digit
+    // ordering) so the Settings list scrolls predictably now that
+    // the bundled count is 400+. Grouping by kind below preserves
+    // per-group order, so builtins still land in their own header
+    // with milkdrop presets sorted underneath.
+    const merged = [...(ipc as VisualizerPlugin[]), ...milk];
+    merged.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true }));
+    setPlugins(merged);
   }
   useEffect(() => { refresh(); }, []);
 
