@@ -6,6 +6,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { UpdateCheckResult } from '../../shared/types';
 import { getSettings } from './settings-store';
+import { setShutdownExitCode } from './shutdown-state';
 
 const exec = promisify(execFile);
 
@@ -417,30 +418,29 @@ export async function applyUpdate(): Promise<ApplyUpdateResult> {
 
   // Source-install auto-relaunch. The git reset above succeeded, so
   // whatever version we're running in this process image is stale.
-  // Exit unconditionally so the wrapper script (run.sh / run.bat)
-  // can re-launch us.
+  // Exit with code 42 and let the wrapper script (run.sh / run.bat)
+  // re-launch a fresh, clean process.
   //
-  // Exit code 42 is the "please restart me" signal. run.sh loops
-  // back to another `npm run electron:dev` on 42; any other code
-  // (0 = normal close, 1 = crash, 130 = Ctrl-C) means stop.
-  //
-  // Why unconditional: a previous version of this code only fired
-  // the relaunch path when `pulledCommits > 0`. When the RENDERER
-  // is HMR'd to a newer auto-apply banner but the MAIN process is
-  // still the old compiled code, the old code's branch wouldn't
-  // fire and the user got stuck with "Restart to load them." sitting
-  // in the banner with no way to act on it. Now: reset succeeded,
-  // so we exit. Always. Fresh process picks up whatever's on disk.
-  //
-  // app.relaunch() tells Electron to spawn a new instance with the
-  // same argv once we exit — works in packaged builds but is a no-op
-  // or flaky under `electron .` dev mode. That's fine: run.sh's
-  // while-42 loop is the actual restart mechanism on source installs;
-  // relaunch() is just belt-and-suspenders for direct electron runs.
-  process.stdout.write(`[updater] restart after source update (+${pulledCommits} commit${pulledCommits === 1 ? '' : 's'}${ranNpmInstall ? ', npm install ran' : ''})\n`);
+  // Why NOT app.relaunch(): under `concurrently` (our dev launcher),
+  // app.relaunch() spawns a new Electron process that's orphaned from
+  // concurrently's process group. Concurrently sees the original
+  // Electron exit and starts killing Vite. The orphan tries to load
+  // localhost:5173 but Vite is dying → black window. Also creates
+  // two app instances both advertising DLNA simultaneously, which
+  // shows up as "two MusicPlayer's" in LAN scans. The wrapper script
+  // does restart cleanly: old concurrently fully tears down (both
+  // Vite and Electron), exit code 42 signals the while-loop to start
+  // fresh concurrently → fresh Vite → fresh Electron. One process
+  // replaces the other with zero overlap.
+  process.stdout.write(`[updater] source update applied (+${pulledCommits} commit${pulledCommits === 1 ? '' : 's'}${ranNpmInstall ? ', npm install ran' : ''}) — exiting 42 for wrapper-driven restart\n`);
   setTimeout(() => {
-    try { app.relaunch(); } catch { /* noop */ }
-    try { app.exit(42); } catch { process.exit(42); }
+    // Tag the shutdown so both the clean-exit path and the watchdog
+    // path terminate with code 42 (run.sh's "respawn me" signal).
+    // Then trigger app.quit, which fires the before-quit orchestrator
+    // that does all the actual cleanup (ffmpeg kill, socket teardown,
+    // process-group SIGTERM, etc.) before calling process.exit(42).
+    setShutdownExitCode(42);
+    try { app.quit(); } catch { process.exit(42); }
   }, 500);
 
   return {

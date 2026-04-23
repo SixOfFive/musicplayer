@@ -14,6 +14,10 @@ import { registerMetadataIpc } from './ipc/metadata';
 import { registerPlaylistsIpc } from './ipc/playlists';
 import { registerCopyLikedIpc } from './ipc/copy-liked';
 import { probeAllLibraryDirs, setLibrarySuspect } from './services/library-health';
+import { shutdownCast } from './services/cast';
+import { shutdownHomeAssistant } from './services/homeassistant';
+import { killAllActiveFfmpeg } from './services/ffmpeg';
+import { getShutdownExitCode } from './services/shutdown-state';
 import { registerStatsIpc } from './ipc/stats';
 import { registerConvertIpc } from './ipc/convert';
 import { registerUpdateIpc } from './ipc/update';
@@ -632,42 +636,31 @@ app.on('window-all-closed', () => {
 //      quit-time is when the user pays the 3-second write cost — but
 //      only once for the whole session instead of on every edit.
 let quitInProgress = false;
+
 app.on('before-quit', (event) => {
   if (quitInProgress) return;
-  // Always preventDefault + take the async path. Even when there's no
-  // dirty state to flush, we still want to cleanly tear down the DLNA
-  // receiver's HTTP server + SSDP sockets, the shared media HTTP
-  // server, mDNS bindings, and the globalShortcut registrations.
-  // Leaving any of those open on Windows holds file handles on
-  // node_modules/*.node which blocks electron-updater's uninstall →
-  // reinstall flow, leaving users stuck on an older version.
   event.preventDefault();
   quitInProgress = true;
 
-  // Global watchdog — no matter what hangs below (a wedged HTTP
-  // socket, a slow network share during flush, a native module
-  // refusing to release file handles), the process dies within 5s
-  // of the user closing the window. Without this, Linux users had to
-  // Ctrl-C the terminal because the Electron main process never
-  // exited: a keep-alive socket on the media / DLNA HTTP servers
-  // was holding the event loop open and `app.exit(0)` was never
-  // reached. process.exit bypasses the event loop entirely so it's
-  // guaranteed to take effect even if something below is stuck.
+  // HARD WATCHDOG. If anything below wedges (a stuck socket, a
+  // spawned child refusing SIGTERM, a slow playlist flush on a
+  // disconnected share), we still die within 3 seconds. process.exit
+  // bypasses Electron + Node's event loops entirely; it's the one
+  // call that's guaranteed to take effect. Tightened from 5s to 3s
+  // because users were complaining about Ctrl-C waits and orphan
+  // receivers showing up in LAN scans — faster watchdog means the
+  // OS cleans up our sockets + helper processes sooner.
   const hardKill = setTimeout(() => {
-    process.stdout.write('[shutdown] watchdog fired — forcing exit\n');
-    process.exit(0);
-  }, 5000);
-  // Don't let the watchdog itself keep Node alive if everything
-  // else finished cleanly first — it'll be cleared before we ever
-  // reach app.exit() on the happy path.
+    process.stdout.write(`[shutdown] watchdog fired — forcing process.exit(${getShutdownExitCode()})\n`);
+    hardKillAllChildrenAndExit(getShutdownExitCode());
+  }, 3000);
   hardKill.unref?.();
 
   const imageDirty = !!(imageCacheDir && imageMemCache.isDirty());
   const plDirty = dirtyPlaylistCount() > 0;
 
-  // Bound individual async steps so one slow step can't eat the
-  // entire 5-second watchdog budget. Resolves as 'timeout' instead
-  // of hanging, keeping the cleanup sequence moving.
+  // Per-step timeout wrapper. `Promise.race` against a hard ceiling
+  // so a slow-persist never eats the whole watchdog budget.
   const withTimeout = <T,>(label: string, ms: number, p: Promise<T>): Promise<T | 'timeout'> =>
     Promise.race([
       p,
@@ -678,46 +671,91 @@ app.on('before-quit', (event) => {
     ]);
 
   (async () => {
-    // Persistence first — data integrity beats clean sockets if we're
-    // only going to get one pass at this. Each step is time-boxed so
-    // a slow network share can't eat the watchdog budget; persistence
-    // gets more room (2s) than socket teardown (1.5s) because losing
-    // dirty playlist data is worse than a leaked TCP socket.
+    process.stdout.write(`[shutdown] begin — target exit code ${getShutdownExitCode()}\n`);
+
+    // --- 1. Persist user data first ---
+    //
+    // Data loss is the worst-case outcome. Playlist edits + image
+    // cache go before anything else so if the watchdog eats part
+    // of the shutdown, we lose sockets (recoverable) not data.
     if (plDirty) {
       try {
-        const r = await withTimeout('playlist flush', 2000, flushDirtyPlaylists());
+        const r = await withTimeout('playlist flush', 1500, flushDirtyPlaylists());
         if (r !== 'timeout' && r.errors > 0) {
-          process.stdout.write(`[playlist-export] ${r.errors} error(s) during flush-on-quit\n`);
+          process.stdout.write(`[shutdown] ${r.errors} playlist flush error(s)\n`);
         }
       } catch (err: any) {
-        process.stdout.write(`[playlist-export] flush-on-quit FAILED: ${err?.message ?? err}\n`);
+        process.stdout.write(`[shutdown] playlist flush FAILED: ${err?.message ?? err}\n`);
       }
     }
     if (imageDirty) {
+      try { await withTimeout('image cache', 1000, saveImageCache(imageCacheDir!)); }
+      catch (err: any) { process.stdout.write(`[shutdown] image cache FAILED: ${err?.message ?? err}\n`); }
+    }
+
+    // --- 2. Kill spawned child processes ---
+    //
+    // ffmpeg conversions MUST die with us — otherwise a Shrink-album
+    // run spawned minutes ago keeps encoding in the background
+    // after the user closes the window and re-opens, which then
+    // corrupts the file that the OLD ffmpeg is about to rename over.
+    try { killAllActiveFfmpeg(); } catch { /* noop */ }
+
+    // --- 3. Stop every long-lived service in parallel ---
+    //
+    // Each of these owns sockets, timers, or mDNS bindings. Running
+    // them in parallel means the whole socket+timer teardown can
+    // finish within one wall-clock second even when several are
+    // slow (e.g. DLNA sending SSDP byebye packets).
+    await Promise.all([
+      withTimeout('dlna',         1500, shutdownDlna()).catch((e) => process.stdout.write(`[shutdown] dlna err: ${e?.message ?? e}\n`)),
+      withTimeout('media-server', 1500, stopMediaServer()).catch((e) => process.stdout.write(`[shutdown] media-server err: ${e?.message ?? e}\n`)),
+      withTimeout('cast',         1000, shutdownCast()).catch((e) => process.stdout.write(`[shutdown] cast err: ${e?.message ?? e}\n`)),
+      // HA + media-keys are sync; wrap to keep the Promise.all shape.
+      Promise.resolve().then(() => {
+        try { shutdownHomeAssistant(); } catch { /* noop */ }
+        try { unregisterMediaKeys(); } catch { /* noop */ }
+      }),
+    ]);
+
+    // --- 4. Force-kill Chromium helper processes (Linux) ---
+    //
+    // Electron's app.exit SHOULD kill all child processes but on
+    // Linux there are edge cases where the zygote or a utility
+    // process survives. Kill our whole process group to be sure,
+    // BEFORE we exit ourselves — otherwise the children become
+    // orphans adopted by PID 1 and linger. -pid = process group.
+    // Only on Linux/macOS; Windows uses different semantics (the
+    // NSIS taskkill in installer.nsh handles the Windows side).
+    if (process.platform !== 'win32') {
       try {
-        await withTimeout('image cache save', 1500, saveImageCache(imageCacheDir!));
-      } catch (err: any) {
-        process.stdout.write(`[image-cache] persist on quit FAILED: ${err?.message ?? err}\n`);
-      }
+        process.stdout.write(`[shutdown] killing process group ${process.pid}\n`);
+        process.kill(-process.pid, 'SIGTERM');
+      } catch { /* we might not be a group leader, fine */ }
     }
 
-    // Socket + process teardown. closeAllConnections() inside the
-    // service stop() functions is what makes these reliably fast now
-    // — without forcibly destroying keep-alive sockets the close()
-    // callback never fires and we'd sit here until the watchdog
-    // nuked us.
-    try { await withTimeout('dlna shutdown', 1500, shutdownDlna()); } catch (err: any) {
-      process.stdout.write(`[shutdown] DLNA teardown error: ${err?.message ?? err}\n`);
-    }
-    try { await withTimeout('media server close', 1500, stopMediaServer()); } catch (err: any) {
-      process.stdout.write(`[shutdown] media server close error: ${err?.message ?? err}\n`);
-    }
-    try { unregisterMediaKeys(); } catch { /* globalShortcut.unregisterAll is forgiving */ }
-
-    // Clear the watchdog — clean-exit path reached. app.exit() rather
-    // than app.quit() because we've already accepted the close intent
-    // and done cleanup; quit() would re-enter before-quit.
+    // --- 5. Done. Terminate hard. ---
     clearTimeout(hardKill);
-    app.exit(0);
+    process.stdout.write(`[shutdown] clean — exit(${getShutdownExitCode()})\n`);
+    hardKillAllChildrenAndExit(getShutdownExitCode());
   })();
 });
+
+/**
+ * Final termination. Called from both the clean-exit path and the
+ * watchdog path. Nukes any remaining spawned children, then calls
+ * process.exit with the target code. process.exit is synchronous
+ * and bypasses the Node event loop — even if a broken service has
+ * a ref'd handle we don't know about, we still die. app.exit is
+ * Electron's softer cousin that can get stuck on misbehaving
+ * native modules; we don't trust it for the last-mile termination.
+ */
+function hardKillAllChildrenAndExit(code: number): never {
+  try { killAllActiveFfmpeg(); } catch { /* noop */ }
+  // Kill the process group as a final sweep on POSIX. SIGKILL is
+  // un-ignorable so any child that refused SIGTERM above dies here.
+  if (process.platform !== 'win32') {
+    try { process.kill(-process.pid, 'SIGKILL'); } catch { /* noop */ }
+  }
+  process.exit(code);
+}

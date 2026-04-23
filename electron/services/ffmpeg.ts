@@ -1,7 +1,45 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { Mp3Quality } from '../../shared/types';
+
+/**
+ * Registry of every ffmpeg child we've spawned that's still alive.
+ * Used at shutdown time to kill any in-progress conversions / tag
+ * rewrites so the app's before-quit handler doesn't wait on (or
+ * leak) a long-running encode. Each spawn adds to this set; each
+ * close/error handler removes.
+ */
+const activeFfmpegChildren = new Set<ChildProcess>();
+
+function trackChild(c: ChildProcess): void {
+  activeFfmpegChildren.add(c);
+  const untrack = () => activeFfmpegChildren.delete(c);
+  c.once('close', untrack);
+  c.once('error', untrack);
+}
+
+/**
+ * Kill every ffmpeg child still running. Called from main's
+ * before-quit so a pending FLAC→MP3 convert doesn't keep the
+ * process alive (Electron doesn't auto-kill spawned children).
+ * SIGTERM first, then SIGKILL after a short grace — ffmpeg
+ * honours SIGTERM quickly when it's between frames.
+ */
+export function killAllActiveFfmpeg(): void {
+  for (const c of activeFfmpegChildren) {
+    try { c.kill('SIGTERM'); } catch { /* noop */ }
+  }
+  // Hard-kill anything still alive 300 ms later. Unref the timer
+  // so it doesn't itself keep the event loop alive.
+  const t = setTimeout(() => {
+    for (const c of activeFfmpegChildren) {
+      try { c.kill('SIGKILL'); } catch { /* noop */ }
+    }
+    activeFfmpegChildren.clear();
+  }, 300);
+  t.unref?.();
+}
 
 // Resolve the ffmpeg binary shipped with ffmpeg-static. The package exports
 // a single string — the absolute path to the right binary for this platform.
@@ -107,6 +145,7 @@ export async function writeTags(
 
   return new Promise((resolve) => {
     const child = spawn(ff, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    trackChild(child);
     let stderr = '';
     child.stderr.on('data', (c: Buffer) => { stderr += c.toString('utf8'); });
     child.on('error', async (err) => {
@@ -184,6 +223,7 @@ export function convertToMp3(
     let childKilled = false;
 
     const child = spawn(ff, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    trackChild(child);
 
     if (signal) {
       if (signal.aborted) {

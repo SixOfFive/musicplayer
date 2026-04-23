@@ -78,6 +78,42 @@ let client: any = null;
 const devicesByKey = new Map<string, RawCastDevice>();
 let activeDeviceKey: string | null = null;
 
+/**
+ * Full teardown — called from main's before-quit. Kills the mDNS
+ * browser, drops every discovered device, clears the status poll,
+ * forgets the active device. Without this, the chromecast-api
+ * client's mDNS socket stays bound on Linux even after the main
+ * process thinks it exited, which can show up as a phantom
+ * "MusicPlayer" in future DLNA/mDNS scans from other apps.
+ */
+export async function shutdownCast(): Promise<void> {
+  stopStatusPolling();
+  activeDeviceKey = null;
+  if (client) {
+    try {
+      // chromecast-api exposes `destroy()` in newer versions; fall back
+      // to tearing down known properties in older versions. Either path
+      // stops the active mDNS browse.
+      if (typeof client.destroy === 'function') {
+        client.destroy();
+      }
+      if (client.browser && typeof client.browser.stop === 'function') {
+        client.browser.stop();
+      }
+      // Close every device's Cast control socket. `chromecast-api`'s
+      // Device exposes `close()` on most versions.
+      for (const d of client.devices ?? []) {
+        try { if (typeof d.close === 'function') d.close(); } catch { /* noop */ }
+      }
+    } catch (err: any) {
+      process.stdout.write(`[cast] shutdown error: ${err?.message ?? err}\n`);
+    }
+    client = null;
+  }
+  devicesByKey.clear();
+  statusListener = null;
+}
+
 /** Cast playback status pushed from a device's `status` event to renderer. */
 export interface CastStatusUpdate {
   currentTime: number;           // seconds into the current track

@@ -66,6 +66,17 @@ function stopStatusPolling(): void {
 
 export function haActiveEntityId(): string | null { return activeEntityId; }
 
+/**
+ * Full teardown for HA integration. Kills the 1 Hz /api/states poll
+ * and forgets the active entity. No network connections to close
+ * (we use fetch + no keep-alive pool), so the timer is the only
+ * thing that keeps the event loop alive here.
+ */
+export function shutdownHomeAssistant(): void {
+  stopStatusPolling();
+  activeEntityId = null;
+}
+
 // ----------------------------------------------------------------------------
 // REST plumbing
 // ----------------------------------------------------------------------------
