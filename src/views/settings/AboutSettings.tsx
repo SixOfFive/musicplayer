@@ -160,6 +160,8 @@ export default function AboutSettings() {
             Any local edits are auto-stashed first (<code className="font-mono">git stash push -u</code> with a timestamped message),
             so clicking "Update now" will <em>always</em> proceed — nothing gets lost, and you can recover stashed edits with <code className="font-mono">git stash list</code> afterwards.
             Native dependencies (like <code className="font-mono">better-sqlite3</code>) are re-linked automatically by <code className="font-mono">run.bat</code> / <code className="font-mono">run.sh</code> the next time the app launches — they detect that <code className="font-mono">package.json</code> changed.
+            {' '}In packaged builds, auto-update events are also written to{' '}
+            <code className="font-mono">userData/update.log</code> for post-mortem when things don't go as planned.
           </p>
         </div>
       </div>

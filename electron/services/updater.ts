@@ -1,6 +1,7 @@
 import { app, BrowserWindow } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { UpdateCheckResult } from '../../shared/types';
@@ -41,12 +42,28 @@ async function getAutoUpdater() {
     _autoUpdater.autoInstallOnAppQuit = true;   // apply the update when the user next quits
 
     // Every auto-updater event goes to BOTH the renderer (for UI) and
-    // main-side stdout (for terminal / log diagnosis). When auto-update
-    // fails silently on Windows — and electron-updater has a dozen
-    // ways to do that: SHA mismatch, 403 on asset download, AV
-    // quarantine, NSIS file-in-use — the user couldn't see any of
-    // it until now. These lines will show exactly where the flow died.
-    const log = (s: string) => process.stdout.write(`[auto-updater] ${s}\n`);
+    // main-side stdout (for terminal / log diagnosis) AND a persistent
+    // log file in userData. The file matters on packaged Windows builds
+    // where there's no terminal to read stdout from — when auto-update
+    // silently fails (SmartScreen block, NSIS file-in-use, SHA mismatch,
+    // etc.) the user can open %APPDATA%\musicplayer\update.log to see
+    // exactly what happened. Truncated to the last 500 KB on startup
+    // so it doesn't grow without bound.
+    const logFilePath = path.join(app.getPath('userData'), 'update.log');
+    try {
+      // Rotate if getting big. 500KB is tiny — this feature only
+      // writes a few lines per update cycle.
+      const st = fsSync.statSync(logFilePath);
+      if (st.size > 500 * 1024) {
+        fsSync.renameSync(logFilePath, logFilePath + '.old');
+      }
+    } catch { /* file doesn't exist yet, fine */ }
+    const log = (s: string) => {
+      const line = `[${new Date().toISOString()}] [auto-updater] ${s}\n`;
+      process.stdout.write(line);
+      try { fsSync.appendFileSync(logFilePath, line); } catch { /* non-fatal */ }
+    };
+    log(`--- session start (app v${app.getVersion()}, platform=${process.platform}, arch=${process.arch}) ---`);
     _autoUpdater.logger = {
       info: (m: any) => log(`info: ${m}`),
       warn: (m: any) => log(`warn: ${m}`),
@@ -284,22 +301,26 @@ export async function applyUpdate(): Promise<ApplyUpdateResult> {
           message: 'Auto-updater is not available in this build.',
         };
       }
-      process.stdout.write('[auto-updater] calling quitAndInstall(isSilent=true, isForceRunAfter=true)\n');
+      process.stdout.write('[auto-updater] calling quitAndInstall(isSilent=false, isForceRunAfter=true)\n');
       // setImmediate so this IPC handler can return before the app quits.
       // Args: (isSilent, isForceRunAfter).
-      //   isSilent=true — run the NSIS installer without the UI wizard, so
-      //     there's no window for Windows to steal focus from, no "click
-      //     next" prompts, no race where the user's click happens while a
-      //     file is still held by the exiting process. With `oneClick: true`
-      //     in package.json's nsis config this is what the updater wants
-      //     anyway; explicit is safer than relying on the default.
+      //   isSilent=FALSE — show the NSIS installer window. Previously
+      //     we used isSilent=true but users on Windows were hitting a
+      //     loop where the app would close and nothing would reinstall:
+      //     the installer was being blocked silently (Windows SmartScreen
+      //     / Defender on an unsigned binary, or NSIS hitting a locked
+      //     .node file handle with no visible error). Non-silent still
+      //     auto-installs (we have `oneClick: true` in nsis config so no
+      //     component-choice wizard), but the user sees a progress bar
+      //     AND any "file in use" or permission dialog that NSIS would
+      //     have swallowed silently. Small UX cost; huge reliability win.
       //   isForceRunAfter=true — the installer launches the new version
-      //     as the last step. Without this, a silent install just exits
-      //     and the user sees the app disappear with no indication it
-      //     upgraded.
+      //     as the last step. Without this, the install completes then
+      //     exits; the user sees the app disappear with no indication
+      //     it upgraded.
       setImmediate(() => {
         try {
-          updater.quitAndInstall(true, true);
+          updater.quitAndInstall(false, true);
         } catch (err: any) {
           // quitAndInstall throws synchronously when called before the
           // download completed or when the cached installer is gone.
