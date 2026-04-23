@@ -100,7 +100,7 @@
         "provider": "github",
         "owner": "SixOfFive",
         "repo": "musicplayer",
-        "releaseType": "release"
+        "releaseType": "draft"
       }
     ],
     "nsis": {

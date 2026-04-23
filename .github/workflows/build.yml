@@ -133,3 +133,39 @@ jobs:
           path: ${{ matrix.artifact_glob }}
           if-no-files-found: error
 
+  # On tag pushes, promote the draft release to a public release ONLY
+  # after every matrix runner has finished uploading its artifacts +
+  # metadata files (latest.yml, latest-mac.yml, latest-linux.yml).
+  #
+  # Why the draft-then-promote dance: electron-builder publishes from
+  # each runner independently. Without this, whichever OS finishes
+  # first creates a PUBLIC release with just its own artifacts; the
+  # other runners append theirs as they finish — but during that
+  # window, end-users whose apps auto-check for updates see a
+  # release-exists / latest.yml-missing state and fail with 404s.
+  #
+  # Marking releaseType='draft' in package.json keeps the release
+  # invisible to electron-updater's public-releases query until this
+  # final job flips the draft flag after all three runners succeed.
+  # From the user's perspective, there's no intermediate broken state:
+  # the release either doesn't exist yet, or exists with every asset.
+  promote-release:
+    needs: build
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Promote draft release to public
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF##*/}"
+          echo "Promoting draft release for tag $TAG to public…"
+          # `gh release edit` with --draft=false flips the flag. Idempotent:
+          # if the release is already non-draft (manual upload, rerun, etc.)
+          # this is a no-op.
+          gh release edit "$TAG" --draft=false --repo "$GITHUB_REPOSITORY"
+          echo "Release $TAG is now public."
+
