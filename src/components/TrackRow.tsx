@@ -30,8 +30,8 @@ function fmt(sec: number | null) {
 }
 
 export default function TrackRow({
-  track, index, siblings,
-}: { track: RowTrack; index: number; siblings: RowTrack[] }) {
+  track, index, siblings, sourcePlaylistId,
+}: { track: RowTrack; index: number; siblings: RowTrack[]; sourcePlaylistId?: number | null }) {
   const play = usePlayer((s) => s.play);
   const liked = usePlayer((s) => s.likedIds.has(track.id));
   const toggleLike = usePlayer((s) => s.toggleLike);
@@ -58,6 +58,12 @@ export default function TrackRow({
         path: t.path, durationSec: t.duration_sec, coverArtPath: t.cover_art_path ?? null,
       })),
       index,
+      // Only passed by PlaylistView — flags the queue as playlist-
+      // sourced so the player's 15s-remaining auto-refresh watcher
+      // activates. All other views (Album/Library/Search/Artist)
+      // leave this undefined and the player treats the queue as
+      // non-refreshable.
+      sourcePlaylistId != null ? { sourcePlaylistId } : undefined,
     );
 
   async function addTo(playlistId: number) {

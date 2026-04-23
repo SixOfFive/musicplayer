@@ -216,7 +216,7 @@ export default function PlaylistView() {
             <SortHeader col="duration" label="Length" sortBy={sortBy} sortDir={sortDir} onChange={setSort} align="right" />
             <div />
           </div>
-          {sorted.map((t, i) => <TrackRow key={t.id} track={t} index={i} siblings={sorted} />)}
+          {sorted.map((t, i) => <TrackRow key={t.id} track={t} index={i} siblings={sorted} sourcePlaylistId={pid} />)}
           {sorted.length === 0 && <div className="p-6 text-text-muted text-sm">No tracks yet.</div>}
         </div>
       </div>

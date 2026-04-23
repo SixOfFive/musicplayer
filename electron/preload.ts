@@ -85,6 +85,15 @@ const api = {
     saveNowPeek: (id: number) => ipcRenderer.invoke('pl:save-now-peek', id),
     saveNow: (id: number, mode: 'overwrite' | 'merge') => ipcRenderer.invoke('pl:save-now', id, mode),
     loadNow: (id: number) => ipcRenderer.invoke('pl:load-now', id),
+    // Mid-playback auto-refresh. Player calls this ~15s before the
+    // current track ends when the queue came from a playlist view.
+    // Returns { changed: false, mtimeMs, reason } when nothing moved
+    // on disk, or { changed: true, mtimeMs, tracks, reason } with
+    // the refreshed tracks ready to swap into the queue on 'ended'.
+    // Pass knownMtimeMs: null to establish a baseline at play-start
+    // without fetching track data.
+    checkRefresh: (id: number, knownMtimeMs: number | null) =>
+      ipcRenderer.invoke('pl:check-refresh', id, knownMtimeMs),
     // Copy every liked track's AUDIO FILE into <dest>/<Artist>/<file>.
     // Interactive: main sends conflict / error prompt events while the
     // copy runs, renderer replies via `copyLikedDecide`. See

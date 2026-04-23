@@ -892,6 +892,131 @@ export async function loadPlaylistNow(playlistId: number): Promise<{
 }
 
 /**
+ * Resolve the full .m3u8 path for a given playlist id, whether it's
+ * a manual playlist or Liked Songs. Returns null if the export
+ * folder isn't configured / reachable, or the playlist doesn't
+ * exist in the DB.
+ */
+export async function getPlaylistFilePath(playlistId: number): Promise<string | null> {
+  const data = getPlaylistRows(playlistId);
+  if (!data) return null;
+  try {
+    const dir = await resolveExportDir();
+    return path.join(dir, sanitizeFilename(data.name) + '.m3u8');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Mid-playback auto-refresh check. Compares the on-disk playlist
+ * file's mtime against a baseline the caller remembered at queue-
+ * load time. If it changed, returns the freshly-parsed, DB-resolved
+ * track list in the same shape the renderer's queue uses so the
+ * caller can swap it in atomically.
+ *
+ * Three outcomes:
+ *   - No file / no export folder → { changed: false, mtimeMs: null, reason }
+ *   - File exists + `knownMtimeMs` is null → { changed: false, mtimeMs }
+ *     "baseline" mode: caller gets the current mtime to remember
+ *     without fetching the (potentially large) track list. Used when
+ *     play() starts from a playlist so the first 15s-remaining check
+ *     has a baseline to compare against.
+ *   - File exists + mtime differs → { changed: true, mtimeMs, tracks: [...] }
+ *
+ * Tracks resolved via tracks.path lookup; paths that don't match an
+ * existing track row are silently dropped (the playlist file might
+ * reference files that haven't been scanned into our library yet,
+ * which is fine — we can only play what we know about).
+ */
+export async function checkPlaylistRefresh(
+  playlistId: number,
+  knownMtimeMs: number | null,
+): Promise<{
+  changed: boolean;
+  mtimeMs: number | null;
+  tracks?: Array<{
+    id: number;
+    title: string;
+    artist: string | null;
+    album: string | null;
+    path: string;
+    durationSec: number | null;
+    coverArtPath: string | null;
+  }>;
+  reason: string;
+}> {
+  const filePath = await getPlaylistFilePath(playlistId);
+  if (!filePath) return { changed: false, mtimeMs: null, reason: 'no-path' };
+
+  let mtimeMs: number;
+  try {
+    const st = await fs.stat(filePath);
+    mtimeMs = st.mtimeMs;
+  } catch {
+    return { changed: false, mtimeMs: null, reason: 'no-file' };
+  }
+
+  // Baseline mode — caller just wants to know the current mtime so
+  // it has something to compare against on the NEXT check. Don't
+  // parse the file or hit the tracks table.
+  if (knownMtimeMs == null) {
+    return { changed: false, mtimeMs, reason: 'baseline' };
+  }
+
+  // 1ms tolerance for FS mtime resolution quirks (see
+  // reconcileLikedIfDiskChanged for the same consideration).
+  if (Math.abs(mtimeMs - knownMtimeMs) < 1) {
+    return { changed: false, mtimeMs, reason: 'unchanged' };
+  }
+
+  // File changed since the baseline — parse + resolve to track rows
+  // in queue-compatible shape so the renderer can swap the queue
+  // without another round-trip.
+  const parsed = await parseM3U(filePath);
+  if (parsed.paths.length === 0) {
+    return { changed: true, mtimeMs, tracks: [], reason: 'empty' };
+  }
+  const db = getDb();
+  const findStmt = db.prepare(`
+    SELECT t.id, t.title, t.path, t.duration_sec AS durationSec,
+           ar.name AS artist, al.title AS album, al.cover_art_path AS coverArtPath
+    FROM tracks t
+    LEFT JOIN artists ar ON ar.id = t.artist_id
+    LEFT JOIN albums  al ON al.id = t.album_id
+    WHERE t.path = ?
+    LIMIT 1
+  `);
+  const findCi = db.prepare(`
+    SELECT t.id, t.title, t.path, t.duration_sec AS durationSec,
+           ar.name AS artist, al.title AS album, al.cover_art_path AS coverArtPath
+    FROM tracks t
+    LEFT JOIN artists ar ON ar.id = t.artist_id
+    LEFT JOIN albums  al ON al.id = t.album_id
+    WHERE LOWER(t.path) = LOWER(?)
+    LIMIT 1
+  `);
+  const tracks: Array<{
+    id: number; title: string; artist: string | null; album: string | null;
+    path: string; durationSec: number | null; coverArtPath: string | null;
+  }> = [];
+  for (const p of parsed.paths) {
+    const row: any = findStmt.get(p) ?? findCi.get(p);
+    if (!row) continue;
+    tracks.push({
+      id: row.id,
+      title: row.title,
+      artist: row.artist,
+      album: row.album,
+      path: row.path,
+      durationSec: row.durationSec,
+      coverArtPath: row.coverArtPath,
+    });
+  }
+  return { changed: true, mtimeMs, tracks, reason: 'disk-changed' };
+}
+
+/**
  * Cross-machine safety net for the Like button. If the on-disk
  * `Liked Songs.m3u8` has been modified since we last wrote or read
  * it (e.g. another machine sharing the same export folder added a

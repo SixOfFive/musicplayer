@@ -64,7 +64,31 @@ interface PlayerState {
   // downgraded in the NowPlayingBar.
   radio: RadioNowPlaying | null;
 
-  play(items: QueueItem[], startIndex?: number): Promise<void>;
+  // --- Mid-playback playlist auto-refresh ---
+  //
+  // Set when play() is invoked FROM a playlist view (PlaylistView
+  // passes a sourcePlaylistId option; everything else leaves it
+  // null). While these are non-null, the engine's timeupdate handler
+  // watches for "15s remaining" and fires a pl:check-refresh IPC to
+  // see if the playlist's .m3u8 on disk changed since we loaded it.
+  //
+  //   queueSourcePlaylistId — the playlist id the queue was loaded
+  //                           from. Cleared when any non-playlist
+  //                           play() replaces the queue.
+  //   queueSourceMtimeMs    — last-known disk mtime of that playlist's
+  //                           .m3u8. Set on play-start (baseline
+  //                           fetch), updated whenever a refresh
+  //                           detects a newer mtime.
+  //   queuePendingRefresh   — a refreshed queue that main sent back
+  //                           the last time the check detected a
+  //                           change. Applied on the 'ended' event
+  //                           for the current track so playback
+  //                           isn't interrupted mid-song.
+  queueSourcePlaylistId: number | null;
+  queueSourceMtimeMs: number | null;
+  queuePendingRefresh: { newTracks: QueueItem[] } | null;
+
+  play(items: QueueItem[], startIndex?: number, options?: { sourcePlaylistId?: number | null }): Promise<void>;
   playRadio(station: RadioNowPlaying): Promise<void>;
   toggle(): void;
   next(): void;
@@ -308,6 +332,13 @@ export const usePlayer = create<PlayerState>((set, get) => {
     }
   }
 
+  // Fires once per currently-playing track when the
+  // remaining-time-triggered refresh check has already been scheduled,
+  // so the timeupdate listener below doesn't fire a dozen IPCs during
+  // the last 15 seconds. Reset on every track change via the
+  // loadAndPlay path's failedTrackIds.clear() neighbour.
+  let refreshCheckedForTrackId: number | null = null;
+
   // tick
   engine.element.addEventListener('timeupdate', () => {
     set({ position: engine.element.currentTime });
@@ -319,7 +350,61 @@ export const usePlayer = create<PlayerState>((set, get) => {
       }
       lastTickAt = now;
     }
+
+    // Playlist mid-playback refresh: when the queue came from a
+    // playlist view AND we're within the last 15 seconds of the
+    // current track AND we haven't already fired the check for this
+    // track, hit main's pl:check-refresh IPC. If the disk file's
+    // mtime changed since our baseline, main returns a fresh track
+    // list which we stash in `queuePendingRefresh` — applied in the
+    // 'ended' handler so playback isn't interrupted mid-song. Gated
+    // by accountingTrackId so it doesn't fire during the pre-play
+    // window where position/duration haven't stabilised yet.
+    const s = get();
+    const cur = s.queue[s.index];
+    const dur = engine.element.duration;
+    if (
+      !engine.element.paused &&
+      s.queueSourcePlaylistId != null &&
+      cur != null &&
+      refreshCheckedForTrackId !== cur.id &&
+      Number.isFinite(dur) && dur > 0 &&
+      // "15 seconds left" — use element time directly so we don't
+      // depend on the Zustand-synced `position` which lags one render.
+      dur - engine.element.currentTime <= 15
+    ) {
+      refreshCheckedForTrackId = cur.id;
+      const sourceId = s.queueSourcePlaylistId;
+      const knownMtime = s.queueSourceMtimeMs;
+      (window.mp.playlists as any).checkRefresh(sourceId, knownMtime)
+        .then((r: any) => {
+          // Confirm the queue hasn't been replaced by a different
+          // play() in the meantime. If it has, drop this response
+          // on the floor — applying stale data would shove the user
+          // into an unrelated queue at track-end.
+          if (get().queueSourcePlaylistId !== sourceId) return;
+          if (!r) return;
+          if (r.changed && Array.isArray(r.tracks)) {
+            console.log(`[player] playlist ${sourceId} changed on disk — queuing refresh (${r.tracks.length} tracks)`);
+            set({
+              queuePendingRefresh: { newTracks: r.tracks },
+              queueSourceMtimeMs: typeof r.mtimeMs === 'number' ? r.mtimeMs : get().queueSourceMtimeMs,
+            });
+          } else if (typeof r.mtimeMs === 'number') {
+            // No change but main returned a fresh mtime — adopt it so
+            // subsequent checks compare against the most current
+            // baseline (unchanged or not, the number's authoritative).
+            set({ queueSourceMtimeMs: r.mtimeMs });
+          }
+        })
+        .catch((err: any) => {
+          console.warn('[player] playlist refresh check failed (non-fatal):', err?.message ?? err);
+        });
+    }
   });
+  // Reset the refresh-check latch whenever a new track starts loading
+  // — ensures the NEXT track's 15s window gets its own IPC fire.
+  engine.element.addEventListener('play', () => { refreshCheckedForTrackId = null; });
   // Only upgrade our displayed duration if the element produces a FINITE
   // positive number. For MP3s without a Xing/VBR header the browser reports
   // `Infinity` or `NaN` until it's scanned enough of the file — during that
@@ -351,6 +436,78 @@ export const usePlayer = create<PlayerState>((set, get) => {
     // calls silently fail and the position counter freezes.
     if (s.repeatMode === 'one') {
       console.log('[player] repeat-one: ended fired unexpectedly — relying on native loop, no manual restart');
+      return;
+    }
+
+    // Apply a pending playlist refresh (if one is waiting). The 15s-
+    // remaining watcher above may have detected that the playlist
+    // file was modified on disk during playback — we deferred the
+    // queue swap until here so the song wouldn't be interrupted.
+    //
+    // Target-track resolution per user spec: "try to play the song
+    // in the playlist after the current playing song when the song
+    // ends". In practice:
+    //   1. Find the track we JUST finished (cur.id) in newTracks.
+    //      If found, play the next one (or stop/wrap at end).
+    //   2. Otherwise (current song was removed on the other machine),
+    //      find the track that USED TO be next (s.queue[s.index+1])
+    //      in newTracks. If it's still there, start playback from it.
+    //   3. If neither the current nor the old-next is in newTracks,
+    //      fall back to playing newTracks[0] so the user doesn't get
+    //      an abrupt stop from a silent "track not found" chain.
+    //      If newTracks is empty (playlist emptied), just stop.
+    if (s.queuePendingRefresh) {
+      const cur = s.queue[s.index];
+      const oldNext = s.queue[s.index + 1];
+      const newTracks = s.queuePendingRefresh.newTracks;
+      console.log(`[player] applying queued playlist refresh (${newTracks.length} tracks); current=${cur?.id} oldNext=${oldNext?.id}`);
+      set({ queuePendingRefresh: null });
+
+      if (newTracks.length === 0) {
+        // Playlist emptied on disk — nothing to play.
+        set({ originalQueue: [], queue: [], index: -1 });
+        engine.stop();
+        return;
+      }
+
+      // 1. Current track still in the new list → play the one after it.
+      if (cur) {
+        const i = newTracks.findIndex((t) => t.id === cur.id);
+        if (i >= 0) {
+          const ni2 = i + 1;
+          if (ni2 >= newTracks.length) {
+            // At the end of the refreshed list. Honour repeat-all,
+            // otherwise stop.
+            if (s.repeatMode === 'all') {
+              set({ originalQueue: newTracks, queue: newTracks, index: 0 });
+              await loadAndPlay(newTracks[0]);
+            } else {
+              set({ originalQueue: newTracks, queue: newTracks, index: newTracks.length - 1 });
+              engine.stop();
+            }
+            return;
+          }
+          set({ originalQueue: newTracks, queue: newTracks, index: ni2 });
+          await loadAndPlay(newTracks[ni2]);
+          return;
+        }
+      }
+
+      // 2. Current gone from new list, but the OLD next-up is still
+      //    there → play it.
+      if (oldNext) {
+        const j = newTracks.findIndex((t) => t.id === oldNext.id);
+        if (j >= 0) {
+          set({ originalQueue: newTracks, queue: newTracks, index: j });
+          await loadAndPlay(newTracks[j]);
+          return;
+        }
+      }
+
+      // 3. Fallback — neither landmark survived the edit. Start from
+      //    the top of the refreshed list so playback doesn't die.
+      set({ originalQueue: newTracks, queue: newTracks, index: 0 });
+      await loadAndPlay(newTracks[0]);
       return;
     }
 
@@ -494,8 +651,11 @@ export const usePlayer = create<PlayerState>((set, get) => {
     repeatMode: 'off',
     shuffle: false,
     radio: null,
+    queueSourcePlaylistId: null,
+    queueSourceMtimeMs: null,
+    queuePendingRefresh: null,
 
-    async play(items, startIndex = 0) {
+    async play(items, startIndex = 0, options) {
       flushAccounting(accountingDurationSec ? accountedSec / accountingDurationSec > 0.5 : false);
       // New top-level play command: reset the "tracks we've given up on"
       // set. Without this, a user who restores a file that was previously
@@ -518,10 +678,42 @@ export const usePlayer = create<PlayerState>((set, get) => {
         startIdx = 0;
       }
 
-      set({ originalQueue: original, queue: playQueue, index: startIdx });
+      // Playlist-source tracking. A `sourcePlaylistId` on the options
+      // flags the queue as "came from a playlist view" → the timeupdate
+      // watcher enables its 15s-remaining refresh check. Anything else
+      // (play from Album / Artist / Library / Search) clears the
+      // tracking so stale refresh attempts against the old playlist
+      // don't fire. Also nuke any pending refresh from the prior queue.
+      const sourcePlaylistId = options?.sourcePlaylistId ?? null;
+      set({
+        originalQueue: original,
+        queue: playQueue,
+        index: startIdx,
+        queueSourcePlaylistId: sourcePlaylistId,
+        queueSourceMtimeMs: null,
+        queuePendingRefresh: null,
+      });
+      // Kick off a baseline mtime fetch so the first 15s-remaining
+      // check has something to compare against. Fire-and-forget —
+      // main returns quickly because baseline mode doesn't parse the
+      // file. If the baseline fetch fails we just stay at null and
+      // the first refresh check becomes the de-facto baseline.
+      if (sourcePlaylistId != null) {
+        (window.mp.playlists as any).checkRefresh(sourcePlaylistId, null)
+          .then((r: any) => {
+            // Only adopt the baseline if the queue we kicked off is
+            // still the current one — if the user played something
+            // else between the IPC round-trip and the response, we'd
+            // stamp a baseline on the wrong queue.
+            if (get().queueSourcePlaylistId === sourcePlaylistId && r?.mtimeMs != null) {
+              set({ queueSourceMtimeMs: r.mtimeMs });
+            }
+          })
+          .catch(() => { /* silent — baseline is best-effort */ });
+      }
       const cur = playQueue[startIdx];
       if (!cur) return;
-      console.log(`[player] play | title="${cur.title}" | shuffle=${shuffle} | queueLen=${playQueue.length}`);
+      console.log(`[player] play | title="${cur.title}" | shuffle=${shuffle} | queueLen=${playQueue.length} | sourcePlaylistId=${sourcePlaylistId}`);
       await loadAndPlay(cur);
     },
 
@@ -544,7 +736,12 @@ export const usePlayer = create<PlayerState>((set, get) => {
       // but the reducer expects it to exist. Start null; the ICY sniffer
       // fills it in as track metadata arrives.
       const fresh: RadioNowPlaying = { ...station, nowPlaying: null };
-      set({ radio: fresh, queue: [], originalQueue: [], index: -1, duration: 0, position: 0 });
+      // Clear playlist-source tracking — we're no longer playing from a
+      // playlist, so the 15s-remaining auto-refresh shouldn't fire.
+      set({
+        radio: fresh, queue: [], originalQueue: [], index: -1, duration: 0, position: 0,
+        queueSourcePlaylistId: null, queueSourceMtimeMs: null, queuePendingRefresh: null,
+      });
       console.log(`[player] playRadio | station="${station.station}" | url=${station.streamUrl}`);
       // crossOrigin='anonymous' is required for MediaElementSource to see
       // audio samples. The main process injects `Access-Control-Allow-Origin:

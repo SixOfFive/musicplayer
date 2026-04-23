@@ -16,6 +16,7 @@ import {
   savePlaylistNow,
   loadPlaylistNow,
   reconcileLikedIfDiskChanged,
+  checkPlaylistRefresh,
 } from '../services/playlist-export';
 import { getSettings } from '../services/settings-store';
 
@@ -306,4 +307,14 @@ export function registerPlaylistsIpc(ipcMain: IpcMain) {
   ipcMain.handle('pl:save-now', (_e, id: number, mode: 'overwrite' | 'merge') =>
     savePlaylistNow(Number(id), mode === 'merge' ? 'merge' : 'overwrite'));
   ipcMain.handle('pl:load-now', (_e, id: number) => loadPlaylistNow(Number(id)));
+
+  // Mid-playback auto-refresh check. Called by the player ~15s before
+  // the currently-playing track ends when the queue originated from a
+  // playlist. Returns either { changed: false, mtimeMs } (nothing
+  // moved on disk since last check) or { changed: true, mtimeMs,
+  // tracks } — with the refreshed track list ready to swap into the
+  // queue at the 'ended' boundary. See player store's
+  // maybeScheduleQueueRefresh for the consumer side.
+  ipcMain.handle('pl:check-refresh', (_e, id: number, knownMtimeMs: number | null) =>
+    checkPlaylistRefresh(Number(id), knownMtimeMs ?? null));
 }
