@@ -624,9 +624,15 @@ export async function shutdownDlna(): Promise<void> {
 
   // Receiver HTTP server — explicit close so any in-flight SOAP
   // responses drain cleanly. Wrapped in a timeout so a stuck client
-  // can't hold us here forever.
+  // can't hold us here forever. closeAllConnections() is the critical
+  // part for Linux — without it, a keep-alive socket from a remote
+  // DLNA sender that never sent its FIN packet will pin the server
+  // open, and `app.quit()` hangs indefinitely (user has to Ctrl-C
+  // the whole shell). 1.5s watchdog as a second line of defense.
   try {
     if (receiverServer) {
+      try { (receiverServer as any).closeAllConnections?.(); } catch { /* noop */ }
+      try { (receiverServer as any).closeIdleConnections?.(); } catch { /* noop */ }
       await new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, 1500);
         try {

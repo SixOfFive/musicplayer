@@ -586,44 +586,80 @@ app.on('before-quit', (event) => {
   event.preventDefault();
   quitInProgress = true;
 
+  // Global watchdog — no matter what hangs below (a wedged HTTP
+  // socket, a slow network share during flush, a native module
+  // refusing to release file handles), the process dies within 5s
+  // of the user closing the window. Without this, Linux users had to
+  // Ctrl-C the terminal because the Electron main process never
+  // exited: a keep-alive socket on the media / DLNA HTTP servers
+  // was holding the event loop open and `app.exit(0)` was never
+  // reached. process.exit bypasses the event loop entirely so it's
+  // guaranteed to take effect even if something below is stuck.
+  const hardKill = setTimeout(() => {
+    process.stdout.write('[shutdown] watchdog fired — forcing exit\n');
+    process.exit(0);
+  }, 5000);
+  // Don't let the watchdog itself keep Node alive if everything
+  // else finished cleanly first — it'll be cleared before we ever
+  // reach app.exit() on the happy path.
+  hardKill.unref?.();
+
   const imageDirty = !!(imageCacheDir && imageMemCache.isDirty());
   const plDirty = dirtyPlaylistCount() > 0;
 
+  // Bound individual async steps so one slow step can't eat the
+  // entire 5-second watchdog budget. Resolves as 'timeout' instead
+  // of hanging, keeping the cleanup sequence moving.
+  const withTimeout = <T,>(label: string, ms: number, p: Promise<T>): Promise<T | 'timeout'> =>
+    Promise.race([
+      p,
+      new Promise<'timeout'>((r) => setTimeout(() => {
+        process.stdout.write(`[shutdown] ${label} timed out after ${ms}ms\n`);
+        r('timeout');
+      }, ms)),
+    ]);
+
   (async () => {
     // Persistence first — data integrity beats clean sockets if we're
-    // only going to get one pass at this.
+    // only going to get one pass at this. Each step is time-boxed so
+    // a slow network share can't eat the watchdog budget; persistence
+    // gets more room (2s) than socket teardown (1.5s) because losing
+    // dirty playlist data is worse than a leaked TCP socket.
     if (plDirty) {
       try {
-        const r = await flushDirtyPlaylists();
-        if (r.errors > 0) process.stdout.write(`[playlist-export] ${r.errors} error(s) during flush-on-quit\n`);
+        const r = await withTimeout('playlist flush', 2000, flushDirtyPlaylists());
+        if (r !== 'timeout' && r.errors > 0) {
+          process.stdout.write(`[playlist-export] ${r.errors} error(s) during flush-on-quit\n`);
+        }
       } catch (err: any) {
         process.stdout.write(`[playlist-export] flush-on-quit FAILED: ${err?.message ?? err}\n`);
       }
     }
     if (imageDirty) {
       try {
-        const r = await saveImageCache(imageCacheDir!);
-        if (r.wrote) process.stdout.write(`[image-cache] persisted ${r.saved} cover${r.saved === 1 ? '' : 's'} to disk before quit\n`);
+        await withTimeout('image cache save', 1500, saveImageCache(imageCacheDir!));
       } catch (err: any) {
         process.stdout.write(`[image-cache] persist on quit FAILED: ${err?.message ?? err}\n`);
       }
     }
 
-    // Socket + process teardown. Each step is bounded by its own
-    // timeout / try-catch so a wedged listener can't prevent quit.
-    try { await shutdownDlna(); } catch (err: any) {
+    // Socket + process teardown. closeAllConnections() inside the
+    // service stop() functions is what makes these reliably fast now
+    // — without forcibly destroying keep-alive sockets the close()
+    // callback never fires and we'd sit here until the watchdog
+    // nuked us.
+    try { await withTimeout('dlna shutdown', 1500, shutdownDlna()); } catch (err: any) {
       process.stdout.write(`[shutdown] DLNA teardown error: ${err?.message ?? err}\n`);
     }
-    try { await stopMediaServer(); } catch (err: any) {
+    try { await withTimeout('media server close', 1500, stopMediaServer()); } catch (err: any) {
       process.stdout.write(`[shutdown] media server close error: ${err?.message ?? err}\n`);
     }
     try { unregisterMediaKeys(); } catch { /* globalShortcut.unregisterAll is forgiving */ }
 
-    // app.exit() rather than app.quit() here — we've already accepted
-    // the close intent and done our cleanup. quit() would re-enter the
-    // before-quit cycle and the `quitInProgress` guard would block it,
-    // but exit() forces immediate termination which is what we want
-    // for auto-update to proceed.
+    // Clear the watchdog — clean-exit path reached. app.exit() rather
+    // than app.quit() because we've already accepted the close intent
+    // and done cleanup; quit() would re-enter before-quit.
+    clearTimeout(hardKill);
     app.exit(0);
   })();
 });

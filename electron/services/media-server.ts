@@ -125,7 +125,25 @@ export async function ensureMediaServer(): Promise<MediaServer> {
     port,
     token,
     async stop() {
-      await new Promise<void>((r) => raw.close(() => r()));
+      // Force-close sockets FIRST, then wait on `.close()`. Without
+      // closeAllConnections() a keep-alive connection from a Cast /
+      // DLNA receiver that hasn't ended naturally will hold the
+      // server open forever — which is exactly what made `app.quit()`
+      // on Linux hang after the window closed, forcing the user to
+      // Ctrl-C the terminal. With it, close() resolves immediately
+      // once the last socket is destroyed.
+      try { (raw as any).closeAllConnections?.(); } catch { /* noop */ }
+      try { (raw as any).closeIdleConnections?.(); } catch { /* noop */ }
+      await new Promise<void>((r) => {
+        // Belt-and-suspenders 1s watchdog in case closeAllConnections
+        // isn't available (Node < 18.2) or a socket dies weirdly.
+        const timer = setTimeout(r, 1000);
+        try {
+          raw.close(() => { clearTimeout(timer); r(); });
+        } catch {
+          clearTimeout(timer); r();
+        }
+      });
       server = null;
       currentServePath = null;
     },
