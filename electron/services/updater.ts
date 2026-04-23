@@ -275,35 +275,19 @@ export async function applyUpdate(): Promise<ApplyUpdateResult> {
   const settings = getSettings();
   const { branch } = settings.update;
 
-  // The old code refused to update when the working tree was dirty,
-  // which meant a user running from source could get stuck if the
-  // app itself (or a package-lock churn from `npm install` during a
-  // prior update, or a build artifact escaping .gitignore) wrote
-  // into the tree. User asked for unconditional override: clicking
-  // "Update" means "bring me to origin, discard whatever's in the
-  // way."
+  // Clicking "Update" means "get me to origin, no questions, no
+  // ceremony." No stash, no prompts, no dirty-tree check — just
+  // overwrite anything tracked and move on.
   //
-  // Safety net: before the reset, stash any dirty state (including
-  // untracked files with `-u`) with a timestamped message. If nothing
-  // is dirty, `git stash push` exits non-zero and we ignore — the
-  // reset below is harmless on a clean tree. If something WAS
-  // stashed, the user can recover with `git stash list` + `git
-  // stash pop` from the project directory.
-  const dirty = await isDirty();
-  if (dirty) {
-    process.stdout.write('[updater] working tree dirty — stashing before reset\n');
-    try {
-      await exec('git', ['stash', 'push', '-u', '-m', `auto-stash from updater ${new Date().toISOString()}`], { cwd: projectRoot() });
-    } catch { /* nothing to stash, or stash disabled — proceed to reset anyway */ }
-  }
-
+  //   git fetch origin <branch>        # pull refs, doesn't touch files
+  //   git reset --hard origin/<branch> # tracked files → origin verbatim
+  //
+  // `reset --hard` silently clobbers uncommitted modifications to
+  // tracked files. Untracked files (settings.json, BRAINDUMP.md,
+  // the dev .claude-tasks/ log dir) are left alone. There is no
+  // scenario where this asks the user anything or refuses.
   const beforeSha = await readLocalSha();
   try {
-    // Fetch first, then hard-reset to origin's tip. `git reset --hard
-    // origin/<branch>` replaces the `git pull --ff-only` that refused
-    // on a dirty tree — this version rewrites tracked files to
-    // match origin verbatim, leaves untracked files alone, and
-    // never fails on local modifications.
     await exec('git', ['fetch', 'origin', branch], { cwd: projectRoot() });
     await exec('git', ['reset', '--hard', `origin/${branch}`], { cwd: projectRoot() });
   } catch (err: any) {
@@ -362,6 +346,25 @@ export async function applyUpdate(): Promise<ApplyUpdateResult> {
     }
   }
 
+  // Source-install auto-relaunch: if we actually pulled new code, just
+  // restart the app immediately. No "Reload to load them" button, no
+  // user click needed — clicking "Update" (or the auto-apply in the
+  // banner) means "get me to origin and back up running on the new
+  // version, end of story." The small setTimeout lets this IPC handler
+  // return first so the banner can render "Updating…" for a blink,
+  // then the Electron process relaunches into itself.
+  if (pulledCommits > 0) {
+    process.stdout.write(`[updater] restart after source update (+${pulledCommits} commit${pulledCommits === 1 ? '' : 's'}${ranNpmInstall ? ', npm install ran' : ''})\n`);
+    setTimeout(() => {
+      try {
+        app.relaunch();
+        app.exit(0);
+      } catch (err: any) {
+        process.stdout.write(`[updater] relaunch failed: ${err?.message ?? err}\n`);
+      }
+    }, 500);
+  }
+
   return {
     ok: true,
     needsRestart: pulledCommits > 0,
@@ -370,8 +373,8 @@ export async function applyUpdate(): Promise<ApplyUpdateResult> {
     ranNpmInstall,
     message: pulledCommits > 0
       ? (ranNpmInstall
-          ? `Pulled ${pulledCommits} new commit${pulledCommits === 1 ? '' : 's'} and installed new dependencies. Restart to load them.`
-          : `Pulled ${pulledCommits} new commit${pulledCommits === 1 ? '' : 's'}. Restart to load them.`)
+          ? `Pulled ${pulledCommits} new commit${pulledCommits === 1 ? '' : 's'} and installed new dependencies. Restarting…`
+          : `Pulled ${pulledCommits} new commit${pulledCommits === 1 ? '' : 's'}. Restarting…`)
       : 'Already up to date.',
   };
 }

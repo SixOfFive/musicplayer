@@ -39,6 +39,11 @@ export default function UpdateBanner() {
   const [auto, setAuto] = useState<AutoEvent | null>(null);
   const [downloadReady, setDownloadReady] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Guard against double-apply when check fires both at startup and
+  // on a 30-min poll, or when the packaged 'downloaded' event arrives
+  // while we're already mid-apply. Once an auto-apply has been kicked
+  // off, further detections in the same session just show UI status.
+  const autoAppliedRef = useRef(false);
 
   useEffect(() => {
     (async () => {
@@ -54,9 +59,19 @@ export default function UpdateBanner() {
     pollRef.current = setInterval(runCheck, 30 * 60 * 1000);
 
     // Listen for electron-updater events (packaged mode only).
+    // When the installer finishes downloading, auto-trigger
+    // quitAndInstall via apply() — no "Restart to install" click.
     const off = (window as any).mp.update.onAutoEvent?.((ev: AutoEvent) => {
       setAuto(ev);
-      if (ev.kind === 'downloaded') setDownloadReady(true);
+      if (ev.kind === 'downloaded') {
+        setDownloadReady(true);
+        if (!autoAppliedRef.current) {
+          autoAppliedRef.current = true;
+          // Defer a tick so the "ready to install" strip renders briefly
+          // before the app quits itself to run the NSIS installer.
+          setTimeout(() => { apply(); }, 300);
+        }
+      }
     });
 
     return () => {
@@ -69,6 +84,16 @@ export default function UpdateBanner() {
   async function runCheck() {
     const r: UpdateCheckResult = await window.mp.update.check();
     setResult(r);
+    // Auto-apply the moment an update is detected. No banner yellow
+    // strip, no "Update now" button click, no local-changes check.
+    // In packaged mode: check() already kicked off autoDownload — the
+    // 'downloaded' listener above will call apply() on completion.
+    // In source mode: apply() runs fetch + reset --hard immediately,
+    // and the main-side auto-relaunch restarts the app on success.
+    if (!r.upToDate && !r.error && !packaged && !autoAppliedRef.current) {
+      autoAppliedRef.current = true;
+      apply();
+    }
   }
 
   async function apply() {
@@ -76,6 +101,10 @@ export default function UpdateBanner() {
     const r: any = await window.mp.update.apply();
     setBusy(false);
     setApplied(r.message);
+    // Source path auto-relaunches main-side, so runCheck() after apply
+    // never gets a chance to fire before the window vanishes — but
+    // leave the call in for the rare case where pulledCommits ended
+    // up at 0 (already up to date, we caught a race).
     if (r.ok && !packaged) await runCheck();
   }
 
