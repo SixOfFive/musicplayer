@@ -1,6 +1,6 @@
 {
   "name": "musicplayer",
-  "version": "0.2.45",
+  "version": "0.2.46",
   "description": "Personal music player with a Spotify-style UI, local library scanning, metadata lookup, and Milkdrop-compatible visualizers.",
   "main": "dist-electron/electron/main.js",
   "author": "sixoffive",
