@@ -7,6 +7,7 @@ import { getSettings } from '../services/settings-store';
 import { fetchAlbumArt, persistAlbumArt } from '../services/metadata-providers';
 import { saveAlbumArt, findFolderCover, reclaimFolderCovers, pruneMissingCoverArt } from '../services/cover-art';
 import { exportAllPlaylists } from '../services/playlist-export';
+import { isLibrarySuspect, probeLibraryDir } from '../services/library-health';
 
 // Set by main.ts once the window exists. Lets services outside the IPC
 // registration closure (e.g. the startup resume) post scan:progress events.
@@ -336,6 +337,139 @@ export function registerScanIpc(ipcMain: IpcMain, getWin: () => BrowserWindow | 
         db.prepare('UPDATE directories SET last_scanned_at = ? WHERE id = ?').run(Date.now(), d.id);
       }
 
+      // ----------------------------------------------------------------
+      // Cleanup pass — remove DB rows for files that no longer exist
+      // on disk, then drop any albums left with zero tracks.
+      // ----------------------------------------------------------------
+      //
+      // Previously the full library scan was additive only: it upserted
+      // every file it found but left behind rows for files that had
+      // been deleted or renamed. Per-album rescan already handled this
+      // correctly; parity extended to the full scan now.
+      //
+      // Safeguards (in the order they gate a delete):
+      //
+      //   1. Don't run cleanup if the session-wide library-suspect
+      //      flag is set. That flag is tripped when the startup probe
+      //      found a missing/empty library dir and the user chose
+      //      "Continue anyway". We're explicitly operating in a
+      //      degraded state; don't nuke the DB just because files
+      //      look absent.
+      //
+      //   2. Only consider removal for tracks whose path is under one
+      //      of the ENABLED library dirs we just scanned. A track
+      //      living under a disabled dir wasn't enumerated this run,
+      //      so its "missing" status tells us nothing.
+      //
+      //   3. Only if the specific library dir the track lives under
+      //      is currently healthy (exists + non-empty). Defends
+      //      against a per-dir mount drop mid-scan (e.g. two music
+      //      dirs, one on SMB that just disconnected). If that dir
+      //      enumerated empty, every track under it would look
+      //      missing — skip those deletions.
+      //
+      // When safeguards are active we log "cleanup skipped" so the user
+      // can tell from stdout why stale rows persisted.
+      let removedTracks = 0;
+      let removedAlbums = 0;
+      if (!cancelled && !isLibrarySuspect()) {
+        const filesSet = new Set(files.map((p) => path.normalize(p)));
+        // Case-insensitive lookup helper — covers SMB / case-insensitive
+        // filesystems where the DB path and the on-disk path differ only
+        // in case. Linux ext4 is case-sensitive so normalize == normalize;
+        // Windows NTFS + SMB from either side are case-insensitive so
+        // lowercase compare prevents false-positive deletes.
+        const filesSetCI = new Set([...filesSet].map((p) => p.toLowerCase()));
+
+        // Per-dir health: one stat+readdir per enabled dir. If any came
+        // back unhealthy (unreachable or empty), tracks under that dir
+        // get skipped for deletion.
+        const dirHealth = new Map<string, boolean>();
+        for (const d of dirs) {
+          const h = await probeLibraryDir(d.path);
+          dirHealth.set(path.normalize(d.path), h.exists && h.nonEmpty);
+        }
+
+        const allTracks = db.prepare('SELECT id, path FROM tracks').all() as Array<{ id: number; path: string }>;
+        const toRemoveIds: number[] = [];
+        let skippedByDisabledDir = 0;
+        let skippedByUnhealthyDir = 0;
+
+        for (const t of allTracks) {
+          const tn = path.normalize(t.path);
+          if (filesSet.has(tn) || filesSetCI.has(tn.toLowerCase())) continue; // still on disk
+
+          // Find the enabled library dir this track lives under.
+          let containingDir: string | null = null;
+          for (const d of dirs) {
+            const dn = path.normalize(d.path);
+            const tnLow = process.platform === 'win32' ? tn.toLowerCase() : tn;
+            const dnLow = process.platform === 'win32' ? dn.toLowerCase() : dn;
+            if (tnLow === dnLow || tnLow.startsWith(dnLow + path.sep) || tnLow.startsWith(dnLow + '/')) {
+              containingDir = dn;
+              break;
+            }
+          }
+          if (!containingDir) {
+            // Track lives outside every enabled library dir. Could be
+            // a disabled dir, an out-of-tree legacy import, etc. Don't
+            // touch it — we didn't have jurisdiction to scan its
+            // folder, so we don't have jurisdiction to delete it.
+            skippedByDisabledDir++;
+            continue;
+          }
+          if (!dirHealth.get(containingDir)) {
+            skippedByUnhealthyDir++;
+            continue;
+          }
+          toRemoveIds.push(t.id);
+        }
+
+        if (toRemoveIds.length > 0) {
+          // `ON DELETE CASCADE` on every tracks.id reference
+          // (track_likes, playlist_tracks, track_plays_summary,
+          // play_events) fires automatically — one DELETE scrubs all
+          // related rows. Requires PRAGMA foreign_keys = ON, which
+          // db.ts sets on every connection.
+          const del = db.prepare('DELETE FROM tracks WHERE id = ?');
+          const tx = db.transaction((ids: number[]) => { for (const id of ids) del.run(id); });
+          tx(toRemoveIds);
+          removedTracks = toRemoveIds.length;
+
+          // Drop any albums that have zero tracks left. Using
+          // LEFT JOIN + WHERE t.id IS NULL to find them in one query.
+          const emptyAlbums = db.prepare(`
+            SELECT a.id FROM albums a
+            LEFT JOIN tracks t ON t.album_id = a.id
+            WHERE t.id IS NULL
+          `).all() as Array<{ id: number }>;
+          if (emptyAlbums.length > 0) {
+            const delA = db.prepare('DELETE FROM albums WHERE id = ?');
+            const txA = db.transaction((ids: number[]) => { for (const id of ids) delA.run(id); });
+            txA(emptyAlbums.map((a) => a.id));
+            removedAlbums = emptyAlbums.length;
+          }
+
+          // Rewrite exported playlists so they no longer reference
+          // deleted paths. Best-effort — scan success shouldn't hinge
+          // on a network share being writable.
+          try { await exportAllPlaylists(); }
+          catch (err: any) {
+            console.error(`[scan] playlist re-export after cleanup failed:`, err?.message ?? err);
+          }
+
+          process.stdout.write(`[scan] cleanup removed ${removedTracks} missing track${removedTracks === 1 ? '' : 's'} and ${removedAlbums} empty album${removedAlbums === 1 ? '' : 's'}\n`);
+        }
+        if (skippedByDisabledDir > 0) {
+          process.stdout.write(`[scan] cleanup skipped ${skippedByDisabledDir} track${skippedByDisabledDir === 1 ? '' : 's'} under non-enabled dirs\n`);
+        }
+        if (skippedByUnhealthyDir > 0) {
+          process.stdout.write(`[scan] cleanup skipped ${skippedByUnhealthyDir} track${skippedByUnhealthyDir === 1 ? '' : 's'} under currently-unhealthy dirs\n`);
+        }
+      } else if (isLibrarySuspect()) {
+        process.stdout.write(`[scan] cleanup skipped — library is in suspect mode (user chose Continue at startup)\n`);
+      }
+
       // Kick off the online art-fetching in the background. We return `done`
       // to the UI immediately so the library is usable; the art worker keeps
       // posting progress via the `art` sub-state and completion events.
@@ -344,6 +478,9 @@ export function registerScanIpc(ipcMain: IpcMain, getWin: () => BrowserWindow | 
         void runArtFetch(touchedIds);
       }
 
+      const cleanupSuffix = removedTracks > 0 || removedAlbums > 0
+        ? ` (removed ${removedTracks} missing track${removedTracks === 1 ? '' : 's'}${removedAlbums > 0 ? ` and ${removedAlbums} empty album${removedAlbums === 1 ? '' : 's'}` : ''})`
+        : '';
       send({
         phase: 'done',
         filesSeen: files.length,
@@ -351,7 +488,7 @@ export function registerScanIpc(ipcMain: IpcMain, getWin: () => BrowserWindow | 
         bytesSeen,
         bytesProcessed,
         currentFile: null,
-        message: artInProgress ? 'Tag scan complete — fetching cover art in background' : 'Scan complete',
+        message: (artInProgress ? 'Tag scan complete — fetching cover art in background' : 'Scan complete') + cleanupSuffix,
       });
       return true;
     } catch (err: any) {
