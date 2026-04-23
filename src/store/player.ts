@@ -742,12 +742,30 @@ export const usePlayer = create<PlayerState>((set, get) => {
     },
     setLikedIds(ids) { set({ likedIds: new Set(ids) }); },
     async toggleLike(trackId) {
-      const liked = await window.mp.likes.toggle(trackId);
+      // Main's LIKE_TOGGLE returns either a bare boolean (legacy /
+      // no-reconcile path) OR an object { liked, reconciledAdded,
+      // allLikedIds } when a cross-machine reconcile pulled new likes
+      // in from disk. Handle both so we don't care which path ran.
+      const r: any = await window.mp.likes.toggle(trackId);
+      const liked = typeof r === 'boolean' ? r : !!r.liked;
+      const reconciledIds: number[] | null = (r && typeof r === 'object' && Array.isArray(r.allLikedIds))
+        ? r.allLikedIds : null;
       set((s) => {
+        // If reconcile fired, swap the entire set — the file on disk
+        // had likes we didn't know about, so the renderer needs to
+        // show those hearts lit immediately.
+        if (reconciledIds) return { likedIds: new Set<number>(reconciledIds) };
         const next = new Set(s.likedIds);
         if (liked) next.add(trackId); else next.delete(trackId);
         return { likedIds: next };
       });
+      // Broadcast library-changed when reconcile actually pulled new
+      // rows in so the Liked Songs view, sidebar counts, etc. pick
+      // up the merged state without waiting for their next natural
+      // refresh trigger.
+      if (reconciledIds) {
+        window.dispatchEvent(new CustomEvent('mp-library-changed'));
+      }
     },
 
     setRepeatMode(m) {

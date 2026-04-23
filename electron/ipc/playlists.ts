@@ -15,6 +15,7 @@ import {
   peekPlaylistFile,
   savePlaylistNow,
   loadPlaylistNow,
+  reconcileLikedIfDiskChanged,
 } from '../services/playlist-export';
 import { getSettings } from '../services/settings-store';
 
@@ -193,6 +194,28 @@ export function registerPlaylistsIpc(ipcMain: IpcMain) {
   });
 
   ipcMain.handle(IPC.LIKE_TOGGLE, async (_e, trackId: number) => {
+    // Cross-machine safety: if the Liked Songs.m3u8 on disk has been
+    // modified since we last wrote/read it (another machine sharing
+    // the same export folder added a like), pull those adds into our
+    // DB BEFORE applying this toggle + export. Without this, our
+    // subsequent write would overwrite the other machine's additions.
+    //
+    // Non-fatal on failure — a dead mount or read error shouldn't
+    // stop the user from liking a song on this machine. Worst case
+    // we keep the pre-feature behavior of last-writer-wins.
+    let reconciledAdded = 0;
+    try {
+      const r = await reconcileLikedIfDiskChanged();
+      if (r.reconciled) {
+        reconciledAdded = r.added;
+        if (r.added > 0) {
+          process.stdout.write(`[like-toggle] reconciled ${r.added} like${r.added === 1 ? '' : 's'} from disk before toggle (skipped=${r.skipped}, missing=${r.missing})\n`);
+        }
+      }
+    } catch (err: any) {
+      process.stdout.write(`[like-toggle] reconcile failed (non-fatal): ${err?.message ?? err}\n`);
+    }
+
     const existing = getDb().prepare('SELECT 1 FROM track_likes WHERE track_id = ?').get(trackId);
     let liked: boolean;
     if (existing) {
@@ -203,6 +226,19 @@ export function registerPlaylistsIpc(ipcMain: IpcMain) {
       liked = true;
     }
     await scheduleExportPlaylist(LIKED_PLAYLIST_ID);
+
+    // If reconcile brought new rows in, hand back the refreshed full
+    // liked-id set so the renderer can swap its local state in one
+    // shot — otherwise the heart icons on the tracks that just got
+    // pulled in from disk wouldn't light up until next refresh.
+    //
+    // Back-compat: when nothing was reconciled, return the legacy
+    // bare-boolean shape. The renderer's toggleLike handles both.
+    if (reconciledAdded > 0) {
+      const allLikedIds = (getDb().prepare('SELECT track_id FROM track_likes').all() as Array<{ track_id: number }>)
+        .map((r) => r.track_id);
+      return { liked, reconciledAdded, allLikedIds };
+    }
     return liked;
   });
 

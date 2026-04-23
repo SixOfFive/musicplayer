@@ -156,6 +156,18 @@ function getPlaylistRows(playlistId: number): {
  *  Cleared on the first successful export. */
 let lastExportError: { message: string; at: number; path: string | null } | null = null;
 
+/**
+ * mtime of `Liked Songs.m3u8` the last time WE wrote or read it. Used
+ * by `reconcileLikedIfDiskChanged` to detect cross-machine edits: if
+ * the file's current mtime differs from this (bigger gap than fs
+ * mtime resolution), another machine wrote to it since we last saw
+ * it, so we pull in any new likes from disk before the next write
+ * clobbers them. In-memory only — first like of each session always
+ * triggers a reconcile check, which is cheap (one stat + maybe one
+ * readFile).
+ */
+let likedKnownMtimeMs: number | null = null;
+
 /** Read-only accessor used by the IPC layer. */
 export function getLastExportError(): { message: string; at: number; path: string | null } | null {
   return lastExportError;
@@ -194,6 +206,14 @@ export async function exportPlaylist(playlistId: number, _oldNameIfRenamed?: str
     await fs.writeFile(target, contents, 'utf8');
     // Success — clear any stale error so the UI banner goes away.
     if (lastExportError) lastExportError = null;
+    // Remember our own write's mtime for the Liked file so the next
+    // like-toggle reconcile doesn't re-read a file we just wrote.
+    if (playlistId === LIKED_PLAYLIST_ID) {
+      try {
+        const st = await fs.stat(target);
+        likedKnownMtimeMs = st.mtimeMs;
+      } catch { /* non-fatal — next like will re-stat */ }
+    }
   } catch (err: any) {
     const message = err?.message ?? String(err);
     console.error('[playlist-export] write failed', message);
@@ -869,6 +889,78 @@ export async function loadPlaylistNow(playlistId: number): Promise<{
   } catch (err: any) {
     return { ok: false, added: 0, skipped: 0, missing: 0, path: target, message: `Load failed: ${err?.message ?? err}` };
   }
+}
+
+/**
+ * Cross-machine safety net for the Like button. If the on-disk
+ * `Liked Songs.m3u8` has been modified since we last wrote or read
+ * it (e.g. another machine sharing the same export folder added a
+ * like), pull those new likes into our DB before the calling code
+ * proceeds with its own like-write. Otherwise the next export would
+ * clobber the other machine's additions.
+ *
+ * Called from the LIKE_TOGGLE IPC handler at the top of every toggle.
+ * Also cheap to skip — we compare mtime first, only read the file
+ * if it changed. On SMB this is one RTT in the common "no change"
+ * case, two more (readFile + parseM3U) when it did change.
+ *
+ * Limitation we accept: this only reconciles ADDS. If another
+ * machine UNLIKED a song that we still have liked, we won't
+ * remove our row — the next save will push the song back onto
+ * disk. Resolving that properly needs per-track timestamps which
+ * the .m3u8 format doesn't carry. Rare in practice; worth calling
+ * out.
+ */
+export async function reconcileLikedIfDiskChanged(): Promise<{
+  reconciled: boolean;
+  added: number;
+  skipped: number;
+  missing: number;
+  reason: string;
+}> {
+  const settings = getSettings();
+  if (!settings.playlistExport?.enabled || !settings.playlistExport.exportLiked) {
+    return { reconciled: false, added: 0, skipped: 0, missing: 0, reason: 'disabled' };
+  }
+  let filePath: string;
+  try {
+    const dir = await resolveExportDir();
+    filePath = path.join(dir, sanitizeFilename(LIKED_FILENAME) + '.m3u8');
+  } catch {
+    // Export folder unreachable — skip. Don't throw; user's click on
+    // the heart icon shouldn't fail just because a share is down.
+    return { reconciled: false, added: 0, skipped: 0, missing: 0, reason: 'no-export-dir' };
+  }
+  let mtimeMs: number;
+  try {
+    const st = await fs.stat(filePath);
+    mtimeMs = st.mtimeMs;
+  } catch {
+    // File doesn't exist yet — first like ever, or someone deleted
+    // the file. Either way, nothing to reconcile from.
+    return { reconciled: false, added: 0, skipped: 0, missing: 0, reason: 'no-file' };
+  }
+  // mtimeMs from fs.stat is a float. Using strict equality is fine
+  // for "same underlying FS event" but we guard with a 1ms tolerance
+  // for platforms / filesystems with low-resolution mtimes (FAT32
+  // rounds to 2-second chunks). Any bigger gap → someone else wrote.
+  if (likedKnownMtimeMs != null && Math.abs(mtimeMs - likedKnownMtimeMs) < 1) {
+    return { reconciled: false, added: 0, skipped: 0, missing: 0, reason: 'unchanged' };
+  }
+  // File differs from what we last wrote/saw. Pull anything new into
+  // the DB. loadPlaylistNow is additive (de-dupes against existing
+  // track_likes), which is exactly what we want here.
+  const result = await loadPlaylistNow(LIKED_PLAYLIST_ID);
+  // Remember the mtime we just observed so the next toggle's stat
+  // compares against this version, not the pre-reconcile state.
+  likedKnownMtimeMs = mtimeMs;
+  return {
+    reconciled: true,
+    added: result.added,
+    skipped: result.skipped,
+    missing: result.missing,
+    reason: 'disk-changed',
+  };
 }
 
 /** Export every playlist + liked. Used on settings change and manual "re-export all". */
