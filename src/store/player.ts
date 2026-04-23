@@ -1166,6 +1166,37 @@ if (typeof window !== 'undefined' && window.mp) {
     });
   }
 
+  // Transport commands (Play/Pause/Stop/Seek) pushed by the remote
+  // DLNA sender — e.g. the Linux MusicPlayer is the sender and we're
+  // receiving; the user hits pause on Linux → SOAP Pause lands on
+  // our receiver → main forwards this event → we actually pause the
+  // element. Without this the element kept playing while the sender
+  // thought it was paused.
+  if (dlnaBridge?.onIncomingTransport) {
+    dlnaBridge.onIncomingTransport((t: { action: 'play' | 'pause' | 'stop' | 'seek'; positionSec?: number }) => {
+      const engine = getAudioEngine();
+      console.log(`[dlna-receiver] transport command: ${t.action}${t.action === 'seek' ? ` @ ${t.positionSec}s` : ''}`);
+      switch (t.action) {
+        case 'pause':
+          engine.element.pause();
+          break;
+        case 'play':
+          engine.play().catch((err: any) => {
+            console.warn(`[dlna-receiver] resume failed: ${err?.message ?? err}`);
+          });
+          break;
+        case 'stop':
+          engine.stop();
+          break;
+        case 'seek':
+          if (typeof t.positionSec === 'number' && Number.isFinite(t.positionSec)) {
+            engine.seek(t.positionSec);
+          }
+          break;
+      }
+    });
+  }
+
   // Periodic state push back to main so DLNA senders polling us see
   // accurate transport + position. Cheap — once per second, same
   // cadence as our own pollers. Skipped when the app isn't acting as

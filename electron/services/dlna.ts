@@ -573,6 +573,19 @@ type IncomingListener = (m: DlnaIncomingMedia) => void;
 let incomingListener: IncomingListener | null = null;
 export function onDlnaIncomingMedia(listener: IncomingListener | null): void { incomingListener = listener; }
 
+/** Transport commands a remote DLNA sender pushes at our receiver
+ *  (Play/Pause/Stop/Seek). Surfaced to the renderer so the real
+ *  `<audio>` element can act on them instead of the receiver just
+ *  silently updating a cached state variable. */
+export interface DlnaIncomingTransport {
+  action: 'play' | 'pause' | 'stop' | 'seek';
+  /** Seek target in seconds. Only set when action === 'seek'. */
+  positionSec?: number;
+}
+type TransportListener = (t: DlnaIncomingTransport) => void;
+let transportListener: TransportListener | null = null;
+export function onDlnaIncomingTransport(listener: TransportListener | null): void { transportListener = listener; }
+
 /** Transport state we report back to senders that poll us. The renderer
  *  tells us what state to report via `setReceiverState`. */
 let receiverState: { transport: 'PLAYING' | 'PAUSED_PLAYBACK' | 'STOPPED' | 'TRANSITIONING'; positionSec: number; durationSec: number; currentUri: string } = {
@@ -786,20 +799,36 @@ async function handleSoapAction(action: string, body: string): Promise<string> {
     }
     case 'Play':
       receiverState.transport = 'PLAYING';
+      // Wake the renderer so the element actually resumes. Without
+      // this, the sender's Play command just sets a flag on main and
+      // the audio stays paused.
+      process.stdout.write('[dlna-receiver] Play command from sender — resuming element\n');
+      transportListener?.({ action: 'play' });
       return soapResponse('Play', AVTRANSPORT_TYPE, {});
     case 'Pause':
       receiverState.transport = 'PAUSED_PLAYBACK';
+      // Forward to the renderer so the element actually pauses. This
+      // was the missing piece that made Linux→Windows pause do nothing:
+      // we updated receiverState here but never told the renderer.
+      process.stdout.write('[dlna-receiver] Pause command from sender — pausing element\n');
+      transportListener?.({ action: 'pause' });
       return soapResponse('Pause', AVTRANSPORT_TYPE, {});
     case 'Stop':
       receiverState.transport = 'STOPPED';
+      process.stdout.write('[dlna-receiver] Stop command from sender — stopping element\n');
+      transportListener?.({ action: 'stop' });
       return soapResponse('Stop', AVTRANSPORT_TYPE, {});
     case 'Seek': {
-      const target = actionArgs.Target || '00:00:00';
-      // Target is HH:MM:SS; the renderer-side handler (in main/preload)
-      // parses it and calls engine.seek. We just echo success — the
-      // renderer will report the new position via the poll back-channel
-      // on next tick.
-      void target;
+      const target = String(actionArgs.Target || '00:00:00');
+      // Target format depends on the sender's Unit arg, but HH:MM:SS
+      // (REL_TIME) is overwhelmingly common. Parse it here rather than
+      // forcing the renderer to. Fallback to 0 on unparseable input.
+      const m = /^(\d+):(\d{1,2}):(\d{1,2})/.exec(target);
+      const positionSec = m
+        ? (parseInt(m[1], 10) * 3600 + parseInt(m[2], 10) * 60 + parseInt(m[3], 10))
+        : Number(target) || 0;
+      process.stdout.write(`[dlna-receiver] Seek command from sender — target=${target} (${positionSec}s)\n`);
+      transportListener?.({ action: 'seek', positionSec });
       return soapResponse('Seek', AVTRANSPORT_TYPE, {});
     }
     case 'GetTransportInfo':

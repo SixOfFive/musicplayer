@@ -13,10 +13,12 @@ import {
   onDlnaStatus,
   onDlnaScanProgress,
   onDlnaIncomingMedia,
+  onDlnaIncomingTransport,
   setReceiverState,
   type DlnaStatusUpdate,
   type DlnaScanProgress,
   type DlnaIncomingMedia,
+  type DlnaIncomingTransport,
 } from '../services/dlna';
 
 /**
@@ -55,6 +57,15 @@ export function registerDlnaIpc(ipcMain: IpcMain, getWin: () => BrowserWindow | 
   onDlnaIncomingMedia((m: DlnaIncomingMedia) => {
     const win = getWin();
     if (win && !win.isDestroyed()) win.webContents.send(IPC.DLNA_INCOMING, m);
+  });
+
+  // Forward transport commands (Play/Pause/Stop/Seek) pushed at our
+  // RECEIVER by remote senders so the renderer's `<audio>` element can
+  // actually act on them. Without this, pause from a remote sender
+  // only updates a cached state variable — the element keeps playing.
+  onDlnaIncomingTransport((t: DlnaIncomingTransport) => {
+    const win = getWin();
+    if (win && !win.isDestroyed()) win.webContents.send(IPC.DLNA_INCOMING_TRANSPORT, t);
   });
 
   ipcMain.handle(IPC.DLNA_LIST, () => {

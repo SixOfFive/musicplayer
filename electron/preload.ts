@@ -242,6 +242,15 @@ const api = {
       ipcRenderer.on(IPC.DLNA_INCOMING, listener);
       return () => ipcRenderer.removeListener(IPC.DLNA_INCOMING, listener);
     },
+    // Transport commands (Play/Pause/Stop/Seek) pushed by a remote
+    // DLNA sender at our receiver. Renderer subscribes to drive its
+    // own <audio> element so pause on the remote side actually pauses
+    // our local playback.
+    onIncomingTransport: (cb: (t: { action: 'play' | 'pause' | 'stop' | 'seek'; positionSec?: number }) => void) => {
+      const listener = (_: unknown, t: any) => cb(t);
+      ipcRenderer.on(IPC.DLNA_INCOMING_TRANSPORT, listener);
+      return () => ipcRenderer.removeListener(IPC.DLNA_INCOMING_TRANSPORT, listener);
+    },
     // Renderer tells main what transport state to report to external
     // DLNA senders polling our receiver.
     setReceiverState: (state: { transport?: 'PLAYING' | 'PAUSED_PLAYBACK' | 'STOPPED' | 'TRANSITIONING'; positionSec?: number; durationSec?: number; currentUri?: string }) =>

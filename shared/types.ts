@@ -365,6 +365,7 @@ export const IPC = {
   DLNA_STATUS:        'dlna:status',    // main → renderer push (sender status)
   DLNA_SCAN:          'dlna:scan',      // main → renderer push (discovery progress)
   DLNA_INCOMING:      'dlna:incoming',  // main → renderer push (receiver got a URL)
+  DLNA_INCOMING_TRANSPORT: 'dlna:incoming-transport', // main → renderer push (sender sent Play/Pause/Stop/Seek)
   DLNA_RECEIVER_STATE:'dlna:receiver-state', // renderer → main (our <audio> state for sender-facing responses)
   // Playback helpers
   PLAYBACK_FILE_URL: 'playback:file-url',
