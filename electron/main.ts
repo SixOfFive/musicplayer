@@ -18,6 +18,7 @@ import { shutdownCast } from './services/cast';
 import { shutdownHomeAssistant } from './services/homeassistant';
 import { killAllActiveFfmpeg } from './services/ffmpeg';
 import { getShutdownExitCode } from './services/shutdown-state';
+import { seedDefaultVisualizerPresets } from './services/default-presets';
 import { registerStatsIpc } from './ipc/stats';
 import { registerConvertIpc } from './ipc/convert';
 import { registerUpdateIpc } from './ipc/update';
@@ -597,6 +598,12 @@ app.whenReady().then(async () => {
     if (result.canceled || result.filePaths.length === 0) return null;
     return result.filePaths[0];
   });
+
+  // Seed bundled visualizer presets into the user's folder before the
+  // window opens — ensures the picker already has them on first boot.
+  // Non-destructive (skips files that already exist), so re-running
+  // never clobbers user tweaks.
+  safeInitAsync('default-presets-seed', () => seedDefaultVisualizerPresets());
 
   createWindow();
 
