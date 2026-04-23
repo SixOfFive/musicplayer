@@ -85,9 +85,17 @@ export default function PlaylistView() {
     try {
       const r: any = await (window.mp.playlists as any).saveNow(pid, mode);
       setToast({ kind: r.ok ? 'ok' : 'err', message: r.message });
-      if (r.ok && mode === 'merge' && r.addedFromDisk > 0) {
-        // Merge pulled tracks into the DB; reload to show them.
+      if (r.ok) {
+        // Reload this view's track list immediately so the user sees
+        // the merged-in tracks without having to navigate away and
+        // back. Also broadcast `mp-library-changed` so the sidebar's
+        // playlist counts, the Liked Songs view if it's mounted, and
+        // anything else using useLibraryRefresh pick up the new
+        // track_likes / playlist_tracks rows. Unconditional on ok:
+        // even an overwrite-with-no-new-tracks benefits from a quick
+        // re-fetch to confirm the view matches disk state.
         load();
+        window.dispatchEvent(new CustomEvent('mp-library-changed'));
       }
     } catch (err: any) {
       setToast({ kind: 'err', message: err?.message ?? String(err) });
@@ -103,7 +111,14 @@ export default function PlaylistView() {
     try {
       const r: any = await (window.mp.playlists as any).loadNow(pid);
       setToast({ kind: r.ok ? 'ok' : 'err', message: r.message });
-      if (r.ok && r.added > 0) load();
+      if (r.ok) {
+        // Same refresh pattern as Save. Load always reloads on
+        // success — even if `added` was 0, the user's mental model is
+        // "I clicked Load, the view should show me the current
+        // disk-reconciled state".
+        load();
+        window.dispatchEvent(new CustomEvent('mp-library-changed'));
+      }
     } catch (err: any) {
       setToast({ kind: 'err', message: err?.message ?? String(err) });
     } finally {
