@@ -66,6 +66,37 @@ function safeInitAsync(label: string, fn: () => Promise<unknown>): void {
   }
 }
 
+// ----- Visualizer GL backend override (Windows) ------------------------
+//
+// Some Milkdrop presets — threshold-driven effects in particular — render
+// correctly on Linux (native OpenGL) but misbehave on Windows where
+// Electron defaults to ANGLE translating GL → D3D11. The symptom is
+// shader arithmetic rounding differently, so conditionals like "invert
+// when q23 > threshold" never trip.
+//
+// Fix: let the user flip to ANGLE's OpenGL backend via a single setting.
+// Chromium command-line switches MUST be applied before app.whenReady,
+// so we synchronously pre-read just this one field from settings.json
+// here at process startup. Everything else still goes through the normal
+// async initSettings path below. If settings.json doesn't exist yet
+// (first run) or the parse fails, we fall back to the default (false =
+// ANGLE D3D11, same as every other Electron app).
+//
+// Only applies on Windows — Linux/macOS already use the native GL stack.
+if (process.platform === 'win32') {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fsSync = require('node:fs') as typeof import('node:fs');
+    const settingsPath = path.join(app.getPath('userData'), 'settings.json');
+    const raw = fsSync.readFileSync(settingsPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (parsed?.visualizer?.forceDesktopGL === true) {
+      app.commandLine.appendSwitch('use-angle', 'gl');
+      process.stdout.write('[gl] visualizer.forceDesktopGL=true — ANGLE routing through OpenGL\n');
+    }
+  } catch { /* no settings yet / parse failed — use default D3D11 backend */ }
+}
+
 // Must be called BEFORE app.ready. `corsEnabled` + a real host in the URL is
 // what stops Chromium's HTMLMediaElement from rejecting the source with
 // "Media load rejected by URL safety check" — without it, the `<audio>`

@@ -2,6 +2,12 @@ import { useEffect, useState } from 'react';
 import type { AppSettings, VisualizerPlugin } from '../../../shared/types';
 import { listBundledMilkdrop } from '../../visualizer/preset-list';
 
+// Platform check helper — the renderer doesn't have direct access to
+// process.platform in sandboxed mode, but `navigator.userAgent` carries
+// the host OS. Good enough to hide the Windows-only OpenGL toggle on
+// Linux / macOS where the setting is a no-op.
+const isWindows = () => /Windows/i.test(navigator.userAgent);
+
 export default function VisualizerSettings() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [plugins, setPlugins] = useState<VisualizerPlugin[]>([]);
@@ -61,6 +67,32 @@ export default function VisualizerSettings() {
             <input type="checkbox" checked={settings.visualizer.fullscreenOnPlay} onChange={(e) => patch({ fullscreenOnPlay: e.target.checked })} />
             Fullscreen when playback starts
           </label>
+
+          {/* Windows-only GL backend toggle. Some Milkdrop presets
+              (threshold-driven effects) render correctly on Linux's
+              native OpenGL but misbehave through ANGLE's HLSL
+              translation on Windows. This flips ANGLE's backend to
+              OpenGL via the --use-angle=gl Chromium switch. Applied
+              on next launch because Chromium switches can only be
+              set before app.whenReady. Hidden on non-Windows where
+              the default already IS native GL. */}
+          {isWindows() && (
+            <label className="flex items-start gap-2 pt-3 border-t border-white/5">
+              <input
+                type="checkbox" className="mt-1"
+                checked={!!settings.visualizer.forceDesktopGL}
+                onChange={(e) => patch({ forceDesktopGL: e.target.checked })}
+              />
+              <span>
+                <span className="font-medium">Use native OpenGL backend</span>
+                <p className="text-xs text-text-muted mt-0.5">
+                  Windows only. Routes visualizer rendering through your GPU's OpenGL driver instead of ANGLE's Direct3D translation.
+                  Fixes threshold-sensitive Milkdrop effects (e.g. lightning flashes, pulse inverses) that work correctly on Linux but not through ANGLE.
+                  Requires <strong>app restart</strong> to take effect. Leave off if you're not seeing visualizer issues — ANGLE is the default for a reason.
+                </p>
+              </span>
+            </label>
+          )}
         </div>
       </div>
 

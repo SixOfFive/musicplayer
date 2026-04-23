@@ -118,6 +118,16 @@ export interface VisualizerSettings {
   smoothing: number;   // 0..1
   fullscreenOnPlay: boolean;
   pluginSearchPaths: string[];
+  /** Force native OpenGL instead of ANGLE's default D3D11 backend on
+   *  Windows. Some Milkdrop presets (threshold-driven effects like
+   *  the stormy-sea lightning) render correctly on Linux/native GL
+   *  but misbehave through ANGLE's HLSL translation. Enabling this
+   *  passes `--use-angle=gl` to Chromium, which keeps ANGLE for
+   *  surface/context management but routes actual GL calls through
+   *  the underlying OpenGL driver. Requires app restart. No-op on
+   *  Linux/macOS (already native GL). Default false so the
+   *  out-of-box experience matches every other Electron app. */
+  forceDesktopGL: boolean;
 }
 
 export type Mp3Quality = 'V0' | 'V2' | 'CBR320' | 'CBR256';

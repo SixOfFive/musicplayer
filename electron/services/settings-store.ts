@@ -90,6 +90,7 @@ function defaults(): AppSettings {
       smoothing: 0.6,
       fullscreenOnPlay: false,
       pluginSearchPaths: [path.join(userData, 'plugins', 'visualizers')],
+      forceDesktopGL: false,
     },
     playback: {
       crossfadeMs: 0,
