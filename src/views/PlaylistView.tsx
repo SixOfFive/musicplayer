@@ -56,6 +56,48 @@ export default function PlaylistView() {
   useEffect(() => { load(); }, [load]);
   useLibraryRefresh(load);
 
+  /**
+   * Auto-reload this playlist from disk every time the user navigates
+   * to it. Pulls in any cross-machine edits that happened while we
+   * were looking somewhere else (or weren't running) without requiring
+   * a manual Load-Now click.
+   *
+   * Behaviour:
+   *   - Runs in parallel with the DB fetch above, so the user sees
+   *     the known state immediately and any disk-only additions land
+   *     a beat later once the IPC round-trip returns.
+   *   - Silent when the disk matches the DB (added: 0). No toast,
+   *     no "Loaded 0 tracks" noise.
+   *   - Surfaces a toast when tracks WERE added, so the user knows
+   *     the view grew. Also dispatches `mp-library-changed` so the
+   *     sidebar's track-count refreshes.
+   *   - Errors (unreachable export folder, parse failure) swallowed
+   *     silently — this is a background nice-to-have; the manual
+   *     Load-Now button remains if the user wants explicit control.
+   *
+   * Skipped on LIKED_PLAYLIST_ID... wait, no — Liked works the same
+   * way through loadNow, and the user's use case explicitly includes
+   * it. Keep the reload unconditional.
+   */
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r: any = await (window.mp.playlists as any).loadNow(pid);
+        if (cancelled) return;
+        if (r?.ok && r.added > 0) {
+          load();
+          window.dispatchEvent(new CustomEvent('mp-library-changed'));
+          setToast({
+            kind: 'ok',
+            message: `Pulled ${r.added} new track${r.added === 1 ? '' : 's'} from disk.`,
+          });
+        }
+      } catch { /* silent — background nice-to-have */ }
+    })();
+    return () => { cancelled = true; };
+  }, [pid, load]);
+
   async function onSaveClick() {
     if (busy !== 'idle') return;
     setToast(null);
