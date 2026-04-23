@@ -205,6 +205,21 @@ export async function stopMediaServer(): Promise<void> {
  * Ties broken by enumeration order (good enough for single-host).
  */
 export function firstLanIp(): string | null {
+  return firstLanInterface()?.address ?? null;
+}
+
+/**
+ * Same ranking as firstLanIp but returns both the IP and the OS
+ * interface name. node-ssdp's Client/Server constructors accept
+ * an `interfaces` array of NAMES (not IPs), so when we need to
+ * constrain SSDP traffic to a specific interface (to avoid
+ * Tailscale / CGNAT routing swallowing our NOTIFY packets), we
+ * need the name too.
+ *
+ * Returns null on machines with no usable LAN interface (unlikely
+ * in practice; we'd already have no-LAN issues elsewhere).
+ */
+export function firstLanInterface(): { address: string; name: string } | null {
   const ifaces = os.networkInterfaces();
   const candidates: Array<{ address: string; rank: number; name: string }> = [];
 
@@ -225,5 +240,5 @@ export function firstLanIp(): string | null {
   if (candidates.length === 0) return null;
   const winner = candidates[0];
   process.stdout.write(`[media-server] LAN IP candidates: ${candidates.map((c) => `${c.address} (${c.name}, rank=${c.rank})`).join(', ')} → using ${winner.address}\n`);
-  return winner.address;
+  return { address: winner.address, name: winner.name };
 }

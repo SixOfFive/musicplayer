@@ -47,6 +47,7 @@ import {
   setCurrentServePath,
   urlForServedFile,
   firstLanIp,
+  firstLanInterface,
   MIME_BY_EXT,
 } from './media-server';
 
@@ -148,10 +149,32 @@ export function startDlnaDiscovery(): void {
   }
   discoveryStartedAt = Date.now();
 
+  // Bind the SSDP socket to our chosen LAN interface. Without this,
+  // node-ssdp uses the OS default interface, which on a Linux box
+  // with Tailscale / ZeroTier installed is often the VPN's CGNAT
+  // interface (100.64/10). SSDP multicast packets sent on that
+  // interface never reach the physical LAN, so we never discover
+  // devices AND nothing on the LAN sees our announcements. We
+  // already compute the right interface for media-server URLs;
+  // reuse it here so discovery + advertising use the same path.
+  const lanIface = firstLanInterface();
+  if (lanIface) {
+    process.stdout.write(`[dlna] binding SSDP client to iface "${lanIface.name}" (${lanIface.address})\n`);
+  } else {
+    process.stdout.write('[dlna] no LAN interface resolved — SSDP client using OS default\n');
+  }
   const client = new ssdpLib.Client({
     // Explicit custom headers so some stricter stacks (older Samsung TVs,
     // BubbleUPnP) return complete NT+USN headers.
     customLogger: () => { /* silent — node-ssdp's built-in logs are noisy */ },
+    // Constrain multicast traffic to the LAN interface. Prevents the
+    // "Windows sees Linux but Linux can't see Windows" asymmetry
+    // caused by a CGNAT VPN interface winning the default-route lottery.
+    ...(lanIface ? { interfaces: [lanIface.name] } : {}),
+    // explicitSocketBind=true makes node-ssdp bind the UDP socket to
+    // the specified interface's IP rather than 0.0.0.0. Required for
+    // the interface filter to actually take effect on Linux.
+    ...(lanIface ? { explicitSocketBind: true } : {}),
   });
   ssdpClient = client;
 
@@ -686,18 +709,29 @@ export async function startDlnaReceiver(friendlyName?: string): Promise<void> {
   // SSDP advertise. node-ssdp's Server re-announces on its own cadence
   // (default 1800s with "freshness" NOTIFYs every 90s) and responds to
   // M-SEARCH probes on port 1900.
-  const ip = firstLanIp();
-  if (!ip) {
+  //
+  // Bind to the LAN interface explicitly — same reason as the client
+  // side above. Without this, the Linux instance would sometimes
+  // advertise over the Tailscale CGNAT interface instead of the
+  // physical LAN, which is exactly how "Windows can't see Linux's
+  // DLNA" showed up in the wild (Linux's client saw Windows fine
+  // because Windows happened to send on its LAN; Linux's server
+  // sent on the wrong interface and nothing on the LAN ever saw it).
+  const lanIface = firstLanInterface();
+  if (!lanIface) {
     process.stdout.write('[dlna-receiver] no LAN IP — advertising skipped; LAN clients won\'t discover us\n');
     return;
   }
-  const location = `http://${ip}:${receiverPort}/dlna/device.xml`;
+  const location = `http://${lanIface.address}:${receiverPort}/dlna/device.xml`;
+  process.stdout.write(`[dlna-receiver] binding SSDP server to iface "${lanIface.name}" (${lanIface.address})\n`);
   ssdpServer = new ssdpLib.Server({
     udn: RECEIVER_UDN,
     location,
     adInterval: 60000,
     ttl: 4,
     customLogger: () => { /* silent */ },
+    interfaces: [lanIface.name],
+    explicitSocketBind: true,
   });
   ssdpServer.addUSN('upnp:rootdevice');
   ssdpServer.addUSN('urn:schemas-upnp-org:device:MediaRenderer:1');
