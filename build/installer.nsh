@@ -79,11 +79,3 @@
 !macro customUnInit
   !insertmacro mpKillStrays
 !macroend
-
-!macro customInit
-  !insertmacro mpKillStrays
-!macroend
-
-!macro customUnInit
-  !insertmacro mpKillStrays
-!macroend
