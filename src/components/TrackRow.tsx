@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { usePlayer } from '../store/player';
 import { useLibrary } from '../store/library';
 import { LIKED_PLAYLIST_ID } from '../../shared/types';
@@ -20,6 +21,14 @@ export interface RowTrack {
   codec?: string | null;
   bitrate?: number | null;       // bits per second
   sample_rate?: number | null;   // Hz
+  // IDs for navigation from the title / album / artist cells. Optional
+  // because some code paths build RowTrack manually (e.g. search
+  // results, suggestions) and may not have them yet — those cells
+  // fall back to plain text when null/missing. `pl:get` and the
+  // Library/Album IPCs pull these via `t.*` so they're present in
+  // the common cases.
+  artist_id?: number | null;
+  album_id?: number | null;
 }
 
 function fmt(sec: number | null) {
@@ -32,6 +41,7 @@ function fmt(sec: number | null) {
 export default function TrackRow({
   track, index, siblings, sourcePlaylistId,
 }: { track: RowTrack; index: number; siblings: RowTrack[]; sourcePlaylistId?: number | null }) {
+  const navigate = useNavigate();
   const play = usePlayer((s) => s.play);
   const liked = usePlayer((s) => s.likedIds.has(track.id));
   const toggleLike = usePlayer((s) => s.toggleLike);
@@ -131,11 +141,46 @@ export default function TrackRow({
           ) : <div className="w-9 h-9 rounded bg-bg-highlight flex-shrink-0" />}
           <div className="min-w-0">
             <div className={`truncate ${isNowPlaying ? 'text-emerald-300 font-medium' : 'text-text-primary'}`}>{track.title}</div>
-            <div className="truncate text-xs text-text-muted">{track.artist ?? ''}</div>
+            {/* Subtitle artist — also clickable when we know the id.
+                stopPropagation keeps the row's parent onClick (which
+                plays the track) from firing when the user is trying
+                to navigate to the artist page. */}
+            {track.artist_id != null && track.artist ? (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); navigate(`/artist/${track.artist_id}`); }}
+                className="block truncate text-xs text-text-muted hover:text-text-primary hover:underline text-left"
+                title={`Go to artist: ${track.artist}`}
+              >{track.artist}</button>
+            ) : (
+              <div className="truncate text-xs text-text-muted">{track.artist ?? ''}</div>
+            )}
           </div>
         </div>
-        <div className="min-w-0 truncate text-text-secondary">{track.album ?? ''}</div>
-        <div className="min-w-0 truncate text-text-muted">{track.artist ?? ''}</div>
+        {/* Album column — clickable when album_id is known, plain
+            text otherwise (e.g. search results / suggestions that
+            don't populate the id). */}
+        {track.album_id != null && track.album ? (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); navigate(`/album/${track.album_id}`); }}
+            className="min-w-0 truncate text-text-secondary hover:text-text-primary hover:underline text-left"
+            title={`Go to album: ${track.album}`}
+          >{track.album}</button>
+        ) : (
+          <div className="min-w-0 truncate text-text-secondary">{track.album ?? ''}</div>
+        )}
+        {/* Artist column — same pattern. */}
+        {track.artist_id != null && track.artist ? (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); navigate(`/artist/${track.artist_id}`); }}
+            className="min-w-0 truncate text-text-muted hover:text-text-primary hover:underline text-left"
+            title={`Go to artist: ${track.artist}`}
+          >{track.artist}</button>
+        ) : (
+          <div className="min-w-0 truncate text-text-muted">{track.artist ?? ''}</div>
+        )}
         {/* Dedicated Quality column — previous attempt to inline this
             inside the artist subtitle got eaten by the parent's
             `truncate`. A fixed-width column ensures the chip is
