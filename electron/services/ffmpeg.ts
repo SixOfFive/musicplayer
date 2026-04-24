@@ -44,13 +44,33 @@ export function killAllActiveFfmpeg(): void {
 // Resolve the ffmpeg binary shipped with ffmpeg-static. The package exports
 // a single string — the absolute path to the right binary for this platform.
 // Lazily required so we don't crash at startup if the dep is missing.
+//
+// Packaged-build gotcha: require('ffmpeg-static') returns a path that
+// points INSIDE app.asar — e.g. ".../resources/app.asar/node_modules/
+// ffmpeg-static/ffmpeg.exe". Node's fs layer can read that via the asar
+// VFS (so `fs.access(p, X_OK)` passes), but the OS can't execute it:
+// `spawn()` will fail because there's no real file at that path. That's
+// why Shrink + tag rewriting work in dev but silently fail in prod.
+//
+// Our package.json's asarUnpack already extracts the binary out to
+// app.asar.unpacked/node_modules/ffmpeg-static/ — a real file on disk.
+// We just have to rewrite the path ffmpeg-static returned so it points
+// at that extracted copy rather than the in-asar virtual path.
 let _ffmpegPath: string | null | undefined;
 export function getFfmpegPath(): string | null {
   if (_ffmpegPath !== undefined) return _ffmpegPath;
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const p = require('ffmpeg-static');
-    _ffmpegPath = (typeof p === 'string' ? p : p?.default) ?? null;
+    let resolved: string | null = (typeof p === 'string' ? p : p?.default) ?? null;
+    if (resolved && resolved.includes('app.asar') && !resolved.includes('app.asar.unpacked')) {
+      // `app.asar/...` → `app.asar.unpacked/...`. The guard above
+      // already ruled out a path that's ALREADY been rewritten, so
+      // a plain string replace is safe — no risk of doubling to
+      // `app.asar.unpacked.unpacked`.
+      resolved = resolved.replace('app.asar', 'app.asar.unpacked');
+    }
+    _ffmpegPath = resolved;
   } catch {
     _ffmpegPath = null;
   }
