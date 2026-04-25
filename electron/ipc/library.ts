@@ -60,10 +60,12 @@ export function registerLibraryIpc(ipcMain: IpcMain, _getWin: () => BrowserWindo
     const q = opts.query ? `%${opts.query}%` : undefined;
     return getDb()
       .prepare(`
-        SELECT t.*, ar.name AS artist, al.title AS album, al.cover_art_path AS cover_art_path
+        SELECT t.*, ar.name AS artist, al.title AS album, al.cover_art_path AS cover_art_path,
+               COALESCE(tps.play_count, 0) AS play_count
         FROM tracks t
         LEFT JOIN artists ar ON ar.id = t.artist_id
         LEFT JOIN albums al ON al.id = t.album_id
+        LEFT JOIN track_plays_summary tps ON tps.track_id = t.id
         ${where}
         ORDER BY ${sortCol} ${sortDir}
         LIMIT @limit OFFSET @offset
@@ -144,10 +146,12 @@ export function registerLibraryIpc(ipcMain: IpcMain, _getWin: () => BrowserWindo
 
     const tracks = getDb()
       .prepare(`
-        SELECT t.*, ar.name AS artist, al.title AS album, al.cover_art_path AS cover_art_path
+        SELECT t.*, ar.name AS artist, al.title AS album, al.cover_art_path AS cover_art_path,
+               COALESCE(tps.play_count, 0) AS play_count
         FROM tracks t
         LEFT JOIN artists ar ON ar.id = t.artist_id
         LEFT JOIN albums al ON al.id = t.album_id
+        LEFT JOIN track_plays_summary tps ON tps.track_id = t.id
         WHERE t.artist_id = ?
         ORDER BY al.year DESC NULLS LAST, al.title ASC, t.disc_no, t.track_no, t.title
       `)
@@ -172,10 +176,12 @@ export function registerLibraryIpc(ipcMain: IpcMain, _getWin: () => BrowserWindo
     // inconsistent by comparison.
     const tracks = getDb()
       .prepare(`
-        SELECT t.*, ar.name AS artist, al.cover_art_path AS cover_art_path
+        SELECT t.*, ar.name AS artist, al.cover_art_path AS cover_art_path,
+               COALESCE(tps.play_count, 0) AS play_count
         FROM tracks t
         LEFT JOIN artists ar ON ar.id = t.artist_id
         LEFT JOIN albums  al ON al.id = t.album_id
+        LEFT JOIN track_plays_summary tps ON tps.track_id = t.id
         WHERE t.album_id = ?
         ORDER BY disc_no, track_no
       `)

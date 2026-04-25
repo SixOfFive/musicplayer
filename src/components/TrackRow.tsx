@@ -29,6 +29,11 @@ export interface RowTrack {
   // the common cases.
   artist_id?: number | null;
   album_id?: number | null;
+  // How many times this track has been played, joined from
+  // track_plays_summary. Optional / falls back to blank when the
+  // caller's IPC didn't pull it. Currently populated by pl:get
+  // (used by PlaylistView and Liked Songs).
+  play_count?: number | null;
 }
 
 function fmt(sec: number | null) {
@@ -120,7 +125,7 @@ export default function TrackRow({
         onClick={playHere}
         onContextMenu={(e) => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY }); }}
         data-alpha-letter={alphaLetter}
-        className={`grid grid-cols-[24px_minmax(0,1.3fr)_minmax(0,1fr)_minmax(0,0.9fr)_92px_72px_40px] gap-3 items-center px-4 py-2 text-sm rounded cursor-pointer select-none ${
+        className={`grid grid-cols-[24px_minmax(0,1.3fr)_minmax(0,1fr)_minmax(0,0.9fr)_92px_56px_72px_40px] gap-3 items-center px-4 py-2 text-sm rounded cursor-pointer select-none ${
           isNowPlaying
             ? 'bg-emerald-500/15 hover:bg-emerald-500/20 ring-1 ring-emerald-500/30'
             : 'hover:bg-white/5'
@@ -188,6 +193,20 @@ export default function TrackRow({
             name somehow gets too long. */}
         <div className="min-w-0 truncate text-xs text-text-muted tabular-nums" title="Format / bitrate / sample rate">
           {formatQuality(track.codec, track.bitrate, track.sample_rate) ?? ''}
+        </div>
+        {/* Plays column — joined from track_plays_summary on the
+            backend. Shows the count when known + non-zero, em-dash
+            otherwise so the column doesn't look broken on freshly-
+            scanned libraries that haven't been listened to yet.
+            Tooltip exposes the singular/plural full word; the cell
+            itself just shows the integer to keep the column narrow. */}
+        <div
+          className={`text-right tabular-nums text-xs ${isNowPlaying ? 'text-emerald-400/70' : 'text-text-muted'}`}
+          title={track.play_count != null
+            ? `${track.play_count} play${track.play_count === 1 ? '' : 's'}`
+            : 'Play count not loaded'}
+        >
+          {track.play_count != null && track.play_count > 0 ? track.play_count : '—'}
         </div>
         <div className={`text-right tabular-nums ${isNowPlaying ? 'text-emerald-400' : 'text-text-secondary'}`}>{fmt(track.duration_sec)}</div>
         <button

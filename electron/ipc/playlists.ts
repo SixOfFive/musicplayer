@@ -113,11 +113,14 @@ export function registerPlaylistsIpc(ipcMain: IpcMain) {
     if (id === LIKED_PLAYLIST_ID) {
       const tracks = getDb()
         .prepare(`
-          SELECT t.*, ar.name AS artist, al.title AS album, al.cover_art_path AS cover_art_path, tl.liked_at AS added_at
+          SELECT t.*, ar.name AS artist, al.title AS album, al.cover_art_path AS cover_art_path,
+                 COALESCE(tps.play_count, 0) AS play_count,
+                 tl.liked_at AS added_at
           FROM track_likes tl
           JOIN tracks t ON t.id = tl.track_id
           LEFT JOIN artists ar ON ar.id = t.artist_id
           LEFT JOIN albums al ON al.id = t.album_id
+          LEFT JOIN track_plays_summary tps ON tps.track_id = t.id
           ORDER BY tl.liked_at DESC
         `)
         .all();
@@ -129,11 +132,14 @@ export function registerPlaylistsIpc(ipcMain: IpcMain) {
     const playlist = getDb().prepare('SELECT * FROM playlists WHERE id = ?').get(id);
     const tracks = getDb()
       .prepare(`
-        SELECT t.*, ar.name AS artist, al.title AS album, al.cover_art_path AS cover_art_path, pt.position AS position, pt.added_at AS added_at
+        SELECT t.*, ar.name AS artist, al.title AS album, al.cover_art_path AS cover_art_path,
+               COALESCE(tps.play_count, 0) AS play_count,
+               pt.position AS position, pt.added_at AS added_at
         FROM playlist_tracks pt
         JOIN tracks t ON t.id = pt.track_id
         LEFT JOIN artists ar ON ar.id = t.artist_id
         LEFT JOIN albums al ON al.id = t.album_id
+        LEFT JOIN track_plays_summary tps ON tps.track_id = t.id
         WHERE pt.playlist_id = ?
         ORDER BY pt.position ASC
       `)
