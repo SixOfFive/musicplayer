@@ -33,6 +33,7 @@ import { unregisterMediaKeys } from './services/media-keys';
 import { registerMediaKeys } from './services/media-keys';
 import { registerSuggestionsIpc } from './ipc/suggestions';
 import { registerTagAuditIpc } from './ipc/tag-audit';
+import { registerLyricsIpc } from './ipc/lyrics';
 import { setAutoUpdaterWindow } from './services/updater';
 import { importPlaylistsFromFolder, flushDirtyPlaylists, dirtyPlaylistCount } from './services/playlist-export';
 import { initDatabase } from './services/db';
@@ -606,6 +607,10 @@ app.whenReady().then(async () => {
   // runs when the renderer asks via suggestions:get.
   safeInit('suggestions-ipc',    () => registerSuggestionsIpc(ipcMain));
   safeInit('tag-audit-ipc',      () => registerTagAuditIpc(ipcMain, () => mainWindow));
+  // Time-synced lyrics: cache + LRCLib fetcher. Soft-fail because the
+  // lyrics panel is purely additive — broken handlers shouldn't take
+  // down the rest of the app.
+  safeInit('lyrics-ipc',         () => registerLyricsIpc(ipcMain));
   setAutoUpdaterWindow(() => mainWindow);
 
   // Debug: toggle DevTools on demand (used by Settings → About & Updates).

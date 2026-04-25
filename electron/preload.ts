@@ -295,6 +295,24 @@ const api = {
   suggestions: {
     get: (limit?: number, seed?: number) => ipcRenderer.invoke(IPC.SUGGESTIONS_GET, limit, seed),
   },
+  // Time-synced lyrics. `get` is cache-first (instant on repeat opens of
+  // the same track); `refetch` bypasses the cache for "wrong match" /
+  // "I just fixed the tags" cases. `setManual` stores user-pasted
+  // lyrics permanently as source='manual' so re-fetches won't clobber
+  // them. `clear` drops the cache row so the next open re-runs the
+  // full disk + LRCLib lookup. All return shapes match
+  // `services/lyrics.ts::LyricsResult`.
+  lyrics: {
+    get: (trackId: number) => ipcRenderer.invoke('lyrics:get', trackId),
+    refetch: (trackId: number) => ipcRenderer.invoke('lyrics:refetch', trackId),
+    setManual: (trackId: number, raw: string) => ipcRenderer.invoke('lyrics:set-manual', trackId, raw),
+    clear: (trackId: number) => ipcRenderer.invoke('lyrics:clear', trackId),
+    // Cheap availability check (cache + disk only, no network).
+    // Returns 'cached' | 'disk' | 'none'. NowPlayingBar uses it to
+    // tint the lyrics icon green when something exists, grey when
+    // nothing does.
+    peek: (trackId: number) => ipcRenderer.invoke('lyrics:peek', trackId),
+  },
   convert: {
     checkAvailable: () => ipcRenderer.invoke(IPC.CONVERT_CHECK_AVAILABLE),
     albumToMp3: (albumId: number) => ipcRenderer.invoke(IPC.CONVERT_ALBUM_TO_MP3, albumId),

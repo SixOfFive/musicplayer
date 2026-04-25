@@ -56,6 +56,18 @@ function defaults(): AppSettings {
       baseUrl: '',
       token: '',
     },
+    lyrics: {
+      // Time-synced lyrics via LRCLib (free, no key, no rate limit).
+      // Default ON because the fetch only fires when the user opens
+      // the panel — there's no cost to leaving it enabled.
+      enabled: true,
+      autoShow: false,
+      showTimedHighlight: true,
+      autoScroll: true,
+      // Side-by-side storage: write fetched lyrics as <basename>.lrc
+      // alongside the audio so they travel with the collection.
+      writeLrcAlongsideAudio: true,
+    },
     library: {
       directories: [],
       databasePath: path.join(userData, 'library.db'),

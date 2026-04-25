@@ -21,6 +21,7 @@ import SearchView from './views/SearchView';
 import Settings from './views/Settings';
 import SuggestedView from './views/SuggestedView';
 import Visualizer from './views/Visualizer';
+import LyricsPanel from './views/LyricsPanel';
 import { useLibrary } from './store/library';
 import { usePlayer } from './store/player';
 // Side-effect import: wires the global IPC listener for convert:progress
@@ -66,6 +67,7 @@ export default function App() {
               <Route path="/radio" element={<RadioView />} />
               <Route path="/lastfm" element={<LastFmView />} />
               <Route path="/visualizer" element={<Visualizer />} />
+              <Route path="/lyrics" element={<LyricsPanel />} />
               <Route path="/settings" element={<Settings />} />
               <Route path="/settings/:tab" element={<Settings />} />
               <Route path="*" element={<Navigate to="/" replace />} />

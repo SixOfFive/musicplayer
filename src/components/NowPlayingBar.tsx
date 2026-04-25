@@ -1,4 +1,5 @@
-import { useNavigate } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { usePlayer } from '../store/player';
 import { mediaUrl } from '../lib/mediaUrl';
 import { parseRadioTitle } from '../lib/parseRadioTitle';
@@ -18,9 +19,78 @@ export default function NowPlayingBar() {
     radio,
   } = usePlayer();
   const nav = useNavigate();
+  const loc = useLocation();
   const cur = queue[index];
   const liked = cur ? likedIds.has(cur.id) : false;
   const isRadio = radio != null;
+  const onLyricsView = loc.pathname === '/lyrics';
+
+  // Mirror the lyrics-enabled setting so we can hide the button when
+  // the user has fully disabled the feature. Live-poll once on mount;
+  // settings changes outside this component require a route revisit
+  // to pick up.
+  const [lyricsEnabled, setLyricsEnabled] = useState(true);
+  const [autoShowLyrics, setAutoShowLyrics] = useState(false);
+  useEffect(() => {
+    window.mp.settings.get().then((s: any) => {
+      setLyricsEnabled(s?.lyrics?.enabled !== false);
+      setAutoShowLyrics(!!s?.lyrics?.autoShow);
+    }).catch(() => { /* defaults are fine */ });
+  }, []);
+
+  // Lyrics-availability tint for the icon. 'cached' or 'disk' →
+  // green, 'none' → grey. Re-probes whenever:
+  //   - the current track id changes
+  //   - the LyricsPanel signals it just saved/cleared lyrics
+  //     (window event 'mp-lyrics-changed' with detail.trackId)
+  //
+  // Cheap IPC (no network), so re-running on every track change is
+  // fine. Stale-response guard discards a probe that resolves after
+  // the user has navigated to a different track.
+  const [lyricsAvail, setLyricsAvail] = useState<'cached' | 'disk' | 'none'>('none');
+  useEffect(() => {
+    if (!cur || cur.id <= 0 || isRadio || !lyricsEnabled) {
+      setLyricsAvail('none');
+      return;
+    }
+    let cancelled = false;
+    const requestedId = cur.id;
+    (window.mp as any).lyrics.peek(requestedId).then((r: 'cached' | 'disk' | 'none') => {
+      if (cancelled) return;
+      if (cur.id !== requestedId) return;
+      setLyricsAvail(r ?? 'none');
+    }).catch(() => { /* fail closed (grey) */ if (!cancelled) setLyricsAvail('none'); });
+    // Re-probe when the panel saves / clears.
+    const onChange = (e: Event) => {
+      const ce = e as CustomEvent<{ trackId?: number }>;
+      if (ce.detail?.trackId === requestedId) {
+        (window.mp as any).lyrics.peek(requestedId).then((r: 'cached' | 'disk' | 'none') => {
+          if (!cancelled && cur.id === requestedId) setLyricsAvail(r ?? 'none');
+        }).catch(() => { /* ignore */ });
+      }
+    };
+    window.addEventListener('mp-lyrics-changed', onChange);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('mp-lyrics-changed', onChange);
+    };
+  }, [cur?.id, isRadio, lyricsEnabled]);
+
+  // Auto-show lyrics on track change when the setting is on. Only
+  // fires when we're not already on the lyrics route (to avoid
+  // navigation loops) and only for real tracks (not radio / DLNA-
+  // pushed -1 ids).
+  useEffect(() => {
+    if (!autoShowLyrics) return;
+    if (!cur || cur.id <= 0) return;
+    if (isRadio) return;
+    if (onLyricsView) return;
+    nav('/lyrics');
+    // We deliberately depend only on cur.id — re-firing on every
+    // navigation back from /lyrics would lock the user inside the
+    // panel.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cur?.id, autoShowLyrics]);
 
   // Like-from-radio: parse the ICY StreamTitle into artist + track name and
   // navigate to /search with those fields as URL params. SearchView's
@@ -99,6 +169,50 @@ export default function NowPlayingBar() {
             title={liked ? 'Remove from Liked Songs' : 'Add to Liked Songs'}
           >
             {liked ? '♥' : '♡'}
+          </button>
+        )}
+        {/* Lyrics toggle. Hidden when:
+            - radio mode (no track id to look up)
+            - DLNA-pushed track (id < 0)
+            - lyrics feature globally disabled in settings
+            Clicking toggles between the lyrics route and going back
+            (history-based, so the user lands wherever they were
+            before opening lyrics). */}
+        {!isRadio && cur && cur.id > 0 && lyricsEnabled && (
+          <button
+            onClick={() => onLyricsView ? nav(-1) : nav('/lyrics')}
+            // Tint priorities:
+            //   - on the lyrics view → accent (Spotify-blue), to show
+            //     where you are
+            //   - lyrics are available (cache or disk) → emerald, so
+            //     you know there's something to read before clicking
+            //   - nothing yet → muted grey, click anyway to trigger
+            //     the LRCLib lookup
+            className={
+              `ml-2 text-base ${
+                onLyricsView
+                  ? 'text-accent'
+                  : lyricsAvail !== 'none'
+                    ? 'text-emerald-400 hover:text-emerald-300'
+                    : 'text-text-muted hover:text-text-primary'
+              }`
+            }
+            title={
+              onLyricsView
+                ? 'Hide lyrics'
+                : lyricsAvail === 'cached' ? 'Show lyrics (cached)'
+                : lyricsAvail === 'disk'   ? 'Show lyrics (.lrc on disk)'
+                : 'Show lyrics (will look up online)'
+            }
+            aria-label="Toggle lyrics panel"
+          >
+            {/* Speech-bubble glyph for "lyrics". Inline SVG so it
+                takes the currentColor + scales cleanly. */}
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+              <line x1="7" y1="9" x2="17" y2="9" />
+              <line x1="7" y1="13" x2="13" y2="13" />
+            </svg>
           </button>
         )}
       </div>

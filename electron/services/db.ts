@@ -104,6 +104,30 @@ export async function initDatabase(): Promise<void> {
     );
     CREATE INDEX IF NOT EXISTS idx_play_events_time ON play_events(played_at);
     CREATE INDEX IF NOT EXISTS idx_play_events_track ON play_events(track_id);
+
+    -- Lyrics cache per track. Populated lazily when the user opens the
+    -- LyricsPanel for a track that doesn't have an entry yet:
+    --   1. Check next to the audio file for <basename>.lrc — if present,
+    --      load synced lyrics from disk (no network).
+    --   2. Else hit LRCLib.net (free, no key) keyed by artist+title+
+    --      album+duration.
+    --   3. Cache the result here so subsequent plays don't re-fetch.
+    --
+    --   source: 'local-lrc' | 'lrclib' | 'manual' | 'none'
+    --     'none' means we tried and the track has no lyrics anywhere -- kept
+    --     so we do not re-poll LRCLib on every play of the same track.
+    --   synced_text: raw LRC body with [mm:ss.cc] timestamps. Null if only
+    --     plain lyrics exist (LRCLib returns both fields independently).
+    --   plain_text: untimestamped fallback. Always populated when synced
+    --     is -- derived by stripping timestamps. Used as the display when
+    --     the user has timed-highlight disabled.
+    CREATE TABLE IF NOT EXISTS track_lyrics (
+      track_id INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
+      source TEXT NOT NULL,
+      synced_text TEXT,
+      plain_text TEXT,
+      fetched_at INTEGER NOT NULL
+    );
   `);
 
   // Lightweight migrations for existing databases (idempotent).

@@ -246,6 +246,46 @@ export interface HomeAssistantSettings {
   token: string;
 }
 
+/**
+ * Time-synced lyrics. The LyricsPanel auto-fetches when opened on a
+ * track that doesn't have a cached entry yet:
+ *   1. <basename>.lrc next to the audio file
+ *   2. LRCLib (lrclib.net — free, no API key, no rate limit)
+ *   3. Result is cached in `track_lyrics` so future opens are instant.
+ */
+export interface LyricsSettings {
+  /** Master switch. When false the lyrics button in the NowPlayingBar
+   *  is hidden and the panel route 404s back to home. Default true —
+   *  LRCLib is free and the fetch only fires when the user opens the
+   *  panel, so there's no zero-cost reason to disable. */
+  enabled: boolean;
+  /** Auto-open the LyricsPanel for every new track. Default false —
+   *  most users only want the panel sometimes, so it stays opt-in.
+   *  When false the user explicitly toggles via the NowPlayingBar
+   *  button. */
+  autoShow: boolean;
+  /** Show the timed highlight (active line follows playback). When
+   *  false the panel renders the plain-text version, no scroll. Some
+   *  users prefer reading ahead. Default true. */
+  showTimedHighlight: boolean;
+  /** Auto-scroll the active line into view. Default true. Disable if
+   *  you'd rather skim the whole text without it jumping. */
+  autoScroll: boolean;
+  /** Write fetched LRC bodies as <basename>.lrc next to the audio
+   *  file so the lyrics travel with the music collection. Other
+   *  machines pointing at the same SMB share, plus mainstream
+   *  players (foobar2000 / MusicBee / Plex / Jellyfin), pick the
+   *  file up automatically. Default true — the SQLite cache alone
+   *  doesn't survive DB resets or library moves, and the file write
+   *  is gracefully skipped on read-only shares.
+   *
+   *  Never overwrites an existing .lrc — that file might be the
+   *  user's hand-curated copy. Only writes when the audio folder
+   *  has no .lrc yet AND we got synced lyrics back from LRCLib /
+   *  manual paste. */
+  writeLrcAlongsideAudio: boolean;
+}
+
 export interface AppSettings {
   firstRunComplete: boolean;
   conversion: ConversionSettings;
@@ -254,6 +294,7 @@ export interface AppSettings {
   debug: DebugSettings;
   lastfm: LastFmSettings;
   homeAssistant: HomeAssistantSettings;
+  lyrics: LyricsSettings;
   library: {
     directories: LibraryDirectory[];
     databasePath: string;
