@@ -33,10 +33,12 @@ export default function LibraryView() {
           <SortHeader col="title" label="Title" sortBy={sortBy} sortDir={sortDir} onChange={setSort} />
           <SortHeader col="album" label="Album" sortBy={sortBy} sortDir={sortDir} onChange={setSort} />
           <SortHeader col="artist" label="Artist" sortBy={sortBy} sortDir={sortDir} onChange={setSort} />
-          {/* Quality isn't currently sortable (no enum in TrackSort) —
-              if the user ever asks for it, swap this for a SortHeader. */}
-          <div className="text-xs uppercase tracking-wide text-text-muted">Quality</div>
-          <div className="text-xs uppercase tracking-wide text-text-muted text-right" title="Times this track has been played">Plays</div>
+          {/* Quality + Plays are server-sorted via the TRACK_SORT_COL
+              map in electron/ipc/library.ts — Quality uses a CASE
+              expression that ranks lossless > lossy. Plays comes from
+              the track_plays_summary join. */}
+          <SortHeader col="quality" label="Quality" sortBy={sortBy} sortDir={sortDir} onChange={setSort} />
+          <SortHeader col="plays" label="Plays" sortBy={sortBy} sortDir={sortDir} onChange={setSort} align="right" />
           <SortHeader col="duration" label="Length" sortBy={sortBy} sortDir={sortDir} onChange={setSort} align="right" />
           <div />
         </div>

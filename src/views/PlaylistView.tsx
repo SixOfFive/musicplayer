@@ -8,6 +8,28 @@ import { useLibraryRefresh } from '../hooks/useLibraryRefresh';
 import ScanProgressPanel from '../components/ScanProgressPanel';
 import MiniVisualizer from '../components/MiniVisualizer';
 
+/**
+ * Codecs we consider lossless. Used to rank Quality sort: a lossless
+ * track always ranks above ANY lossy track regardless of bitrate, then
+ * we tie-break within each tier by sample_rate (lossless) or bitrate
+ * (lossy). Codec strings come from music-metadata + ffmpeg-static and
+ * may be either short ("flac") or long-form ("MPEG 1 Layer 3"); match
+ * case-insensitively against fragments.
+ */
+const LOSSLESS_CODEC_HINTS = ['flac', 'wav', 'alac', 'ape', 'aiff', 'wavpack'];
+function qualityScore(t: any): number {
+  const codec = String(t.codec ?? '').toLowerCase();
+  const isLossless = LOSSLESS_CODEC_HINTS.some((h) => codec.includes(h));
+  if (isLossless) {
+    // Big constant guarantees lossless > any lossy result. Within
+    // lossless, higher sample_rate wins (24/96 > 16/44.1, etc.).
+    return 10_000_000 + (Number(t.sample_rate) || 0);
+  }
+  // Lossy: order by bitrate (bits/sec). 320 kbps = 320000 etc. Tracks
+  // with no bitrate fall to the bottom of the lossy tier.
+  return Number(t.bitrate) || 0;
+}
+
 function sortTracks(tracks: RowTrack[], by: TrackSort, dir: SortDir) {
   const mul = dir === 'asc' ? 1 : -1;
   const key: (t: any) => any = (t) => {
@@ -20,6 +42,8 @@ function sortTracks(tracks: RowTrack[], by: TrackSort, dir: SortDir) {
       case 'duration': return t.duration_sec ?? 0;
       case 'track_no': return t.track_no ?? 0;
       case 'date_added': return t.added_at ?? t.date_added ?? 0;
+      case 'plays': return Number(t.play_count) || 0;
+      case 'quality': return qualityScore(t);
     }
   };
   return [...tracks].sort((a, b) => {
@@ -254,8 +278,12 @@ export default function PlaylistView() {
             <SortHeader col="title" label="Title" sortBy={sortBy} sortDir={sortDir} onChange={setSort} />
             <SortHeader col="album" label="Album" sortBy={sortBy} sortDir={sortDir} onChange={setSort} />
             <SortHeader col="artist" label="Artist" sortBy={sortBy} sortDir={sortDir} onChange={setSort} />
-            <div className="text-xs uppercase tracking-wide text-text-muted">Quality</div>
-            <div className="text-xs uppercase tracking-wide text-text-muted text-right" title="Times this track has been played">Plays</div>
+            {/* Quality + Plays are now sortable like the rest. Quality
+                ranks lossless > lossy, then by sample_rate / bitrate
+                within each tier. Plays uses play_count from the
+                track_plays_summary join. */}
+            <SortHeader col="quality" label="Quality" sortBy={sortBy} sortDir={sortDir} onChange={setSort} />
+            <SortHeader col="plays" label="Plays" sortBy={sortBy} sortDir={sortDir} onChange={setSort} align="right" />
             <SortHeader col="duration" label="Length" sortBy={sortBy} sortDir={sortDir} onChange={setSort} align="right" />
             <div />
           </div>

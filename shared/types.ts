@@ -781,7 +781,7 @@ export interface NeatStats {
   activeYearCount: number;
 }
 
-export type TrackSort = 'title' | 'artist' | 'album' | 'year' | 'genre' | 'duration' | 'date_added' | 'track_no';
+export type TrackSort = 'title' | 'artist' | 'album' | 'year' | 'genre' | 'duration' | 'date_added' | 'track_no' | 'plays' | 'quality';
 export type SortDir = 'asc' | 'desc';
 
 export interface TrackQuery {

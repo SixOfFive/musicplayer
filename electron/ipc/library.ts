@@ -9,6 +9,27 @@ import { statWithFallback } from '../services/fs-fallback';
 import { isTrackLibraryDirHealthy, isLibrarySuspect } from '../services/library-health';
 import { rescanAlbum } from './scan';
 
+// Quality is computed at sort time: lossless codecs (FLAC / WAV / ALAC /
+// APE / AIFF / WavPack) get a fixed offset that guarantees they sort
+// above any lossy codec, then sample_rate breaks ties within lossless
+// and bitrate breaks ties within lossy. The CASE matches the codec
+// fragments music-metadata + ffmpeg-static produce ("flac" plain or
+// "MPEG 1 Layer 3" / "AAC LC" etc. for lossy). Ten-million constant is
+// well above any realistic bitrate (320000 bps) so the partition is
+// clean.
+const QUALITY_SORT_EXPR = `
+  CASE
+    WHEN LOWER(COALESCE(t.codec, '')) LIKE '%flac%'
+      OR LOWER(COALESCE(t.codec, '')) LIKE '%wav%'
+      OR LOWER(COALESCE(t.codec, '')) LIKE '%alac%'
+      OR LOWER(COALESCE(t.codec, '')) LIKE '%ape%'
+      OR LOWER(COALESCE(t.codec, '')) LIKE '%aiff%'
+      OR LOWER(COALESCE(t.codec, '')) LIKE '%wavpack%'
+    THEN 10000000 + COALESCE(t.sample_rate, 0)
+    ELSE COALESCE(t.bitrate, 0)
+  END
+`;
+
 const TRACK_SORT_COL: Record<TrackSort, string> = {
   title: 't.title',
   artist: 'ar.name',
@@ -18,6 +39,11 @@ const TRACK_SORT_COL: Record<TrackSort, string> = {
   duration: 't.duration_sec',
   date_added: 't.date_added',
   track_no: 't.track_no',
+  // Plays comes from the track_plays_summary LEFT JOIN already in
+  // every track query; alias works because we SELECT it as
+  // COALESCE(tps.play_count, 0) AS play_count.
+  plays: 'play_count',
+  quality: QUALITY_SORT_EXPR,
 };
 const ALBUM_SORT_COL: Record<AlbumSort, string> = {
   title: 'al.title',
