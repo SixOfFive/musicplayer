@@ -164,26 +164,80 @@ export function registerConvertIpc(ipcMain: IpcMain, getWin: () => BrowserWindow
         }
 
         // --- 3. Remove the FLAC --------------------------------------------
-        // Honors the moveOriginalsToTrash setting. trashItem goes to OS
-        // Recycle Bin on local volumes; on SMB it may hard-delete (the
-        // user is aware and accepts this — per-track verification above
-        // ensures we never remove a FLAC without a good MP3 in place).
-        try {
-          if (settings.conversion.moveOriginalsToTrash) await shell.trashItem(resolvedFlac);
-          else await fs.unlink(resolvedFlac);
-        } catch (err: any) {
-          // Couldn't remove the FLAC. The MP3 is valid but we now have
-          // both formats. Don't update the DB (keep it pointing at the
-          // FLAC, which still works). Continue — user ends up with an
-          // extra mp3 in the folder but no data loss.
-          process.stdout.write(`[convert] couldn't remove ${baseName} after convert: ${err?.message ?? err} — DB left on FLAC, skipping\n`);
+        // Two-tier delete with automatic fallback to plain unlink. The
+        // user-visible setting is "move originals to trash" — but
+        // trashing fails outright on:
+        //   - SMB / network mounts on Linux (freedesktop trash spec
+        //     needs ~/.local/share/Trash on the SAME volume, which
+        //     SMB shares don't have)
+        //   - Some Windows network shares where IFileOperation can't
+        //     find a Recycle Bin to redirect to
+        //   - macOS smbfs mounts pre-Sonoma
+        //
+        // Previous behavior: trash failure → skip → DB still on FLAC,
+        // MP3 already on disk → next rescan picks up the orphan MP3 as
+        // a NEW track → duplicate rows in the album view. Users hit
+        // this on every shrink against an SMB-mounted music library,
+        // and re-running shrink couldn't fix it because the MP3 path
+        // was now UNIQUE-constrained by the rescanned row.
+        //
+        // New behavior: try trash; on failure, fall back to unlink
+        // (which works on every share that supports writes at all);
+        // only if BOTH fail do we declare a true skip + delete the
+        // orphan MP3 so we don't leave the duplicate state behind.
+        let removeOk = false;
+        let removeErrMsg: string | null = null;
+        if (settings.conversion.moveOriginalsToTrash) {
+          try {
+            await shell.trashItem(resolvedFlac);
+            removeOk = true;
+          } catch (err: any) {
+            removeErrMsg = err?.message ?? String(err);
+            process.stdout.write(`[convert] trashItem failed on ${baseName} (${removeErrMsg}) — falling back to unlink\n`);
+          }
+        }
+        if (!removeOk) {
+          try {
+            await fs.unlink(resolvedFlac);
+            removeOk = true;
+          } catch (err: any) {
+            removeErrMsg = err?.message ?? String(err);
+          }
+        }
+        if (!removeOk) {
+          // Both delete strategies failed (truly read-only share,
+          // permission denied, etc.). The MP3 is valid but the FLAC
+          // is stuck. Delete the orphan MP3 so we don't leave a
+          // duplicate state behind for rescan to discover.
+          try { await fs.unlink(outPath); } catch { /* best effort */ }
+          process.stdout.write(`[convert] couldn't remove ${baseName}: ${removeErrMsg} — removed orphan MP3, FLAC preserved, skipping\n`);
           tracksSkipped++;
-          skipReasons.push(`${baseName}: couldn't remove original (${err?.message ?? err})`);
+          skipReasons.push(`${baseName}: couldn't remove original (${removeErrMsg})`);
           continue;
         }
 
         // --- 4. Commit the DB update ---------------------------------------
-        update.run(outPath, mp3Size, MP3_CODEC, r.id);
+        // Handle the "previous failed-delete + rescan" case: a row may
+        // already exist at the MP3 path because a prior shrink left the
+        // MP3 on disk and a subsequent rescan adopted it as a new
+        // track. The path column is UNIQUE so a naive UPDATE would
+        // throw; instead we keep the existing MP3 row (it may have
+        // accumulated plays / likes / playlist memberships) and drop
+        // the now-stale FLAC row.
+        const existing = db.prepare(
+          'SELECT id FROM tracks WHERE path = ? AND id != ?'
+        ).get(outPath, r.id) as { id: number } | undefined;
+        if (existing) {
+          // Refresh the surviving row's size + codec (the just-encoded
+          // MP3 may differ from whatever the rescan saw). Then drop
+          // the FLAC row — CASCADE cleans up its likes / plays / etc.
+          db.prepare('UPDATE tracks SET size = ?, codec = ? WHERE id = ?')
+            .run(mp3Size, MP3_CODEC, existing.id);
+          db.prepare('DELETE FROM tracks WHERE id = ?').run(r.id);
+          process.stdout.write(`[convert] merged duplicate rows: dropped FLAC row ${r.id}, kept existing MP3 row ${existing.id}\n`);
+        } else {
+          update.run(outPath, mp3Size, MP3_CODEC, r.id);
+        }
         tracksConverted++;
         bytesAfter += mp3Size;
 
