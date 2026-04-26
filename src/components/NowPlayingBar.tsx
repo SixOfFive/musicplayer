@@ -4,6 +4,7 @@ import { usePlayer } from '../store/player';
 import { mediaUrl } from '../lib/mediaUrl';
 import { parseRadioTitle } from '../lib/parseRadioTitle';
 import OutputDevicePicker from './OutputDevicePicker';
+import NowPlayingLyric from './NowPlayingLyric';
 
 function fmt(sec: number) {
   if (!Number.isFinite(sec)) return '0:00';
@@ -214,6 +215,18 @@ export default function NowPlayingBar() {
               <line x1="7" y1="13" x2="13" y2="13" />
             </svg>
           </button>
+        )}
+        {/* Inline active-line lyric strip. Sits to the right of the
+            song info + icon row, taking whatever horizontal space is
+            left in the song grid column before the play controls
+            begin. Renders null when no synced lyrics are available
+            (radio, no cache, plain-text-only, lyrics disabled in
+            settings) so the bar stays visually clean for tracks
+            without lyrics. Click → /lyrics. */}
+        {!isRadio && cur && cur.id > 0 && lyricsEnabled && lyricsAvail !== 'none' && !onLyricsView && (
+          <div className="ml-3 flex-1 min-w-0 hidden md:block">
+            <NowPlayingLyric trackId={cur.id} onClick={() => nav('/lyrics')} />
+          </div>
         )}
       </div>
 
