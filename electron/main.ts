@@ -761,23 +761,22 @@ app.on('before-quit', (event) => {
       }),
     ]);
 
-    // --- 4. Force-kill Chromium helper processes (Linux) ---
+    // --- 4. Done. Terminate hard. ---
     //
-    // Electron's app.exit SHOULD kill all child processes but on
-    // Linux there are edge cases where the zygote or a utility
-    // process survives. Kill our whole process group to be sure,
-    // BEFORE we exit ourselves — otherwise the children become
-    // orphans adopted by PID 1 and linger. -pid = process group.
-    // Only on Linux/macOS; Windows uses different semantics (the
-    // NSIS taskkill in installer.nsh handles the Windows side).
-    if (process.platform !== 'win32') {
-      try {
-        process.stdout.write(`[shutdown] killing process group ${process.pid}\n`);
-        process.kill(-process.pid, 'SIGTERM');
-      } catch { /* we might not be a group leader, fine */ }
-    }
-
-    // --- 5. Done. Terminate hard. ---
+    // We previously also did `process.kill(-process.pid, SIGTERM)`
+    // here on Linux/macOS to nuke any stray Chromium helper
+    // processes — but that targets the entire process GROUP, and
+    // when the app is launched from a desktop session whose group
+    // is shared with the user's own Chrome browser (e.g. via the
+    // login-session bus or a terminal that also spawned chrome),
+    // the SIGTERM blasts Chrome too. Bad. Removed.
+    //
+    // Electron's app.quit + process.exit below already SIGTERM the
+    // direct children Electron spawned (renderer, GPU process,
+    // utility processes). The ffmpeg children we explicitly track
+    // get killed in step 2. That covers every long-lived child
+    // we're responsible for; anything we didn't spawn isn't ours
+    // to kill.
     clearTimeout(hardKill);
     process.stdout.write(`[shutdown] clean — exit(${getShutdownExitCode()})\n`);
     hardKillAllChildrenAndExit(getShutdownExitCode());
@@ -795,10 +794,10 @@ app.on('before-quit', (event) => {
  */
 function hardKillAllChildrenAndExit(code: number): never {
   try { killAllActiveFfmpeg(); } catch { /* noop */ }
-  // Kill the process group as a final sweep on POSIX. SIGKILL is
-  // un-ignorable so any child that refused SIGTERM above dies here.
-  if (process.platform !== 'win32') {
-    try { process.kill(-process.pid, 'SIGKILL'); } catch { /* noop */ }
-  }
+  // No process-group SIGKILL here — see step 4 in before-quit for
+  // the full rationale. tl;dr the negative-PID kill could land on
+  // the user's Chrome browser when the app and Chrome share a
+  // process group (common with desktop-session launches), so we
+  // restrict ourselves to children we explicitly tracked.
   process.exit(code);
 }
