@@ -21,13 +21,15 @@
 ;      Stop-Process -Force. Catches invisible helpers with no window
 ;      that are still holding better_sqlite3.node or similar.
 ;
-;   4. PowerShell window-title sweep: finds any process with a main
-;      window titled "MusicPlayer" and kills it. Catches the rare
-;      case where a helper has been renamed but still displays the
-;      app's window (blocks NSIS's window-title running-check).
-;
-;   5. 1-second settling pause before NSIS's post-init running-check
+;   4. 1-second settling pause before NSIS's post-init running-check
 ;      fires, so the process table snapshot it reads is clean.
+;
+; NOTE: an earlier version also did a `MainWindowTitle -like '*usicPlayer*'`
+; sweep as a final catch-all. That was a footgun: any browser tab on
+; "github.com/SixOfFive/musicplayer" had "musicplayer" in its window
+; title, and the wildcard match killed the user's whole browser
+; mid-download. Removed -- the targeted taskkill calls above + the
+; module-scan are sufficient.
 ;
 ; PowerShell is on every supported Windows install (7+). The -NoProfile
 ; / -ExecutionPolicy Bypass flags keep it from being blocked by
@@ -49,11 +51,17 @@
 
   Sleep 1500
 
-  ; Module-scan + window-title sweep. Single PowerShell invocation
-  ; that does both passes. Everything wrapped in an outer try/catch
-  ; so a Modules-access exception on a protected process (e.g.
-  ; System.exe) doesn't abort the whole cleanup.
-  nsExec::Exec `powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "try { $$t = [Environment]::GetFolderPath('LocalApplicationData') + '\Programs\musicplayer'; Get-Process | Where-Object { try { $$_.Modules | Where-Object { $$_.FileName -like ($$t + '*') } } catch { $$false } } | ForEach-Object { Stop-Process -Id $$_.Id -Force -ErrorAction SilentlyContinue }; Get-Process | Where-Object { $$_.MainWindowTitle -like '*usicPlayer*' } | ForEach-Object { Stop-Process -Id $$_.Id -Force -ErrorAction SilentlyContinue } } catch {}`
+  ; Module-scan sweep. Finds any process whose loaded modules live
+  ; inside our install dir and force-stops it. Wrapped in an outer
+  ; try/catch so a Modules-access exception on a protected process
+  ; (e.g. System.exe) doesn't abort the whole cleanup.
+  ;
+  ; Window-title sweep was REMOVED: a wildcard `*usicPlayer*` match
+  ; on MainWindowTitle killed the user's Chrome browser when they
+  ; were on the GitHub releases page during install. The module
+  ; sweep alone is sufficient -- nothing outside our install dir
+  ; should be loading our DLLs.
+  nsExec::Exec `powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "try { $$t = [Environment]::GetFolderPath('LocalApplicationData') + '\Programs\musicplayer'; Get-Process | Where-Object { try { $$_.Modules | Where-Object { $$_.FileName -like ($$t + '*') } } catch { $$false } } | ForEach-Object { Stop-Process -Id $$_.Id -Force -ErrorAction SilentlyContinue } } catch {}`
 
   Sleep 800
 !macroend
