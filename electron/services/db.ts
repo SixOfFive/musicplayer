@@ -150,3 +150,24 @@ export function getDb(): Database.Database {
   if (!db) throw new Error('DB not initialized');
   return db;
 }
+
+/**
+ * Close the SQLite handle at app shutdown. Called from main's
+ * before-quit so the .db / .db-wal / .db-shm file handles are
+ * released before the process exits — critical on Windows where
+ * an open handle blocks the auto-updater from replacing the .exe
+ * during install.
+ *
+ * `wal_checkpoint(TRUNCATE)` flushes any unmerged WAL frames into
+ * the main DB and truncates the -wal file so we leave a tidy
+ * state on disk. Wrapped in try/catch because a checkpoint
+ * failure (e.g. another writer holding a lock) shouldn't block
+ * the close — better to leave a non-empty WAL than refuse to
+ * release the handle.
+ */
+export function closeDatabase(): void {
+  if (!db) return;
+  try { db.pragma('wal_checkpoint(TRUNCATE)'); } catch { /* noop */ }
+  try { db.close(); } catch { /* noop */ }
+  db = null;
+}

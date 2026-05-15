@@ -34,9 +34,10 @@ import { registerMediaKeys } from './services/media-keys';
 import { registerSuggestionsIpc } from './ipc/suggestions';
 import { registerTagAuditIpc } from './ipc/tag-audit';
 import { registerLyricsIpc } from './ipc/lyrics';
-import { setAutoUpdaterWindow } from './services/updater';
+import { setAutoUpdaterWindow, cancelAutoUpdater } from './services/updater';
 import { importPlaylistsFromFolder, flushDirtyPlaylists, dirtyPlaylistCount } from './services/playlist-export';
-import { initDatabase } from './services/db';
+import { initDatabase, closeDatabase } from './services/db';
+import { shutdownRadioSniffer } from './ipc/radio';
 import { initSettings, getSettings } from './services/settings-store';
 
 const isDev = !app.isPackaged;
@@ -754,12 +755,28 @@ app.on('before-quit', (event) => {
       withTimeout('dlna',         1500, shutdownDlna()).catch((e) => process.stdout.write(`[shutdown] dlna err: ${e?.message ?? e}\n`)),
       withTimeout('media-server', 1500, stopMediaServer()).catch((e) => process.stdout.write(`[shutdown] media-server err: ${e?.message ?? e}\n`)),
       withTimeout('cast',         1000, shutdownCast()).catch((e) => process.stdout.write(`[shutdown] cast err: ${e?.message ?? e}\n`)),
-      // HA + media-keys are sync; wrap to keep the Promise.all shape.
+      // HA + media-keys + radio sniffer + auto-updater are sync; wrap
+      // to keep the Promise.all shape. Each owns its own
+      // socket/timer/listener that would otherwise pin the event loop:
+      //   - HA: 1 Hz REST poll timer
+      //   - media-keys: globalShortcut bindings
+      //   - radio sniffer: long-lived HTTP request to the stream URL
+      //   - auto-updater: in-flight installer download (packaged builds)
       Promise.resolve().then(() => {
         try { shutdownHomeAssistant(); } catch { /* noop */ }
         try { unregisterMediaKeys(); } catch { /* noop */ }
+        try { shutdownRadioSniffer(); } catch { /* noop */ }
+        try { cancelAutoUpdater(); } catch { /* noop */ }
       }),
     ]);
+
+    // --- 3.5. Close the SQLite handle ---
+    //
+    // Done AFTER every other service stops so nothing tries one last
+    // query against a closed connection. Releases the file handles
+    // on .db / .db-wal / .db-shm so Windows can replace the .exe
+    // during auto-update without "file in use" errors.
+    try { closeDatabase(); } catch { /* noop */ }
 
     // --- 4. Done. Terminate hard. ---
     //
@@ -791,10 +808,41 @@ app.on('before-quit', (event) => {
  * a ref'd handle we don't know about, we still die. app.exit is
  * Electron's softer cousin that can get stuck on misbehaving
  * native modules; we don't trust it for the last-mile termination.
+ *
+ * Windows-only belt: we ALSO spawn a detached `taskkill /F /T /PID
+ * <our-pid>` that fires ~1s after we exit. Even when our own
+ * process.exit successfully terminates the main process, on Windows
+ * we've seen Chromium GPU helper processes, the network service
+ * helper, and occasionally a stuck better-sqlite3 native worker
+ * survive as orphans for several seconds — visible in Task Manager
+ * after the window has closed. /T (tree) reaps every child of
+ * our PID; /F forces termination so a hung helper can't refuse.
+ * Detached + unref'd so the cmd.exe outlives us; the 1-second ping
+ * delay gives our own process.exit a chance to do its job cleanly
+ * first, so taskkill is purely a safety net for stragglers.
  */
 function hardKillAllChildrenAndExit(code: number): never {
   try { killAllActiveFfmpeg(); } catch { /* noop */ }
-  // No process-group SIGKILL here — see step 4 in before-quit for
+
+  if (process.platform === 'win32') {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { spawn } = require('node:child_process');
+      // `cmd /c "ping ... & taskkill ..."` — ping is just a portable
+      // 1-second sleep that's available on every Windows install,
+      // no PowerShell needed. & runs the next command unconditionally.
+      // detached + unref + stdio:'ignore' so this child fully decouples
+      // from our process and the parent's exit doesn't kill it.
+      const child = spawn(
+        'cmd.exe',
+        ['/c', `ping -n 2 127.0.0.1 > nul & taskkill /F /T /PID ${process.pid} > nul 2>&1`],
+        { detached: true, stdio: 'ignore', windowsHide: true },
+      );
+      child.unref();
+    } catch { /* noop — the safety net itself is best-effort */ }
+  }
+
+  // No process-group SIGKILL on POSIX — see step 4 in before-quit for
   // the full rationale. tl;dr the negative-PID kill could land on
   // the user's Chrome browser when the app and Chrome share a
   // process group (common with desktop-session launches), so we

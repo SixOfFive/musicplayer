@@ -476,6 +476,33 @@ export async function applyUpdate(): Promise<ApplyUpdateResult> {
   };
 }
 
+/**
+ * Best-effort cancel of any in-flight electron-updater download.
+ * Called from main's before-quit. The updater's internal Net session
+ * holds an HTTPS connection while pulling the new installer (often
+ * 80–120 MB); closing those sockets lets the process exit promptly
+ * instead of waiting on the kernel TCP timeout.
+ *
+ * Sync, swallow-all-errors — we never want shutdown to fail because
+ * the updater module had a bad day.
+ */
+export function cancelAutoUpdater(): void {
+  if (!_autoUpdater) return;
+  try {
+    // electron-updater exposes the underlying Electron `net.Session`
+    // on `.netSession` in modern versions; closing its idle + active
+    // connections aborts any pending request. Older versions don't
+    // expose it — guard with optional chaining.
+    const sess: any = (_autoUpdater as any).netSession;
+    sess?.closeAllConnections?.();
+  } catch { /* noop */ }
+  try {
+    // Drop our event listeners so the (now-orphaned) downloader can't
+    // fire renderer-bound IPC into a destroyed window.
+    _autoUpdater.removeAllListeners();
+  } catch { /* noop */ }
+}
+
 export async function getUpdateInfo(): Promise<{ version: string; sha: string | null; dirty: boolean; packaged: boolean }> {
   return {
     version: await readPkgVersion(),

@@ -44,3 +44,18 @@ export function registerRadioIpc(ipcMain: IpcMain, getWin: () => BrowserWindow |
     if (activeSniffer) { activeSniffer.stop(); activeSniffer = null; activeUrl = null; }
   });
 }
+
+/**
+ * Tear down any active radio metadata sniffer. Called from main's
+ * before-quit. The sniffer holds a long-lived HTTP connection to the
+ * stream URL — if we don't kill it explicitly, the open socket can
+ * keep the process alive past quit time, especially on Windows where
+ * a half-closed TCP socket can block app exit for several seconds.
+ */
+export function shutdownRadioSniffer(): void {
+  if (activeSniffer) {
+    try { activeSniffer.stop(); } catch { /* noop */ }
+    activeSniffer = null;
+    activeUrl = null;
+  }
+}
